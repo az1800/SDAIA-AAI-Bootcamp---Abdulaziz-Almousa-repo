@@ -1,0 +1,22 @@
+---
+title: "John Snow (Solution Key)"
+format: html
+---
+
+### Question 1: Correlation vs. Causation
+
+The map showed a high concentration of deaths near the Broad Street pump. However, proximity alone only proves a correlation. What specific steps did Snow take to move his argument from correlation (deaths happen near the pump) to causation (the pump water is causing the deaths)?
+
+> Goal: Guide students to discuss the importance of isolating variables and investigating anomalies (like the brewery workers who were close by but didn't drink the water, or the Hampstead widow who was far away but did).
+
+### Question 2: The Danger of Missing Data
+
+Imagine if Snow had only collected data from the local hospitals, rather than walking the streets and knocking on doors. How would this have changed his dataset, and how might it have altered his conclusions?
+
+> Goal: Introduce the concept of selection bias. Hospital records might over-represent certain demographics or miss individuals who died quickly at home, skewing the spatial distribution map.
+
+### Question 3: The "Miasma" of Today
+
+The "miasma theory" was a widely accepted consensus that was fundamentally incorrect but seemed to explain the surface-level facts (Soho smelled bad, and people in Soho were dying). What is a modern example of a "miasma"—a widely accepted assumption in business, society, or science that might fall apart if rigorously tested with data?
+
+> Goal: Guide students to question reality and look with a critical eye on how things can be done differently.

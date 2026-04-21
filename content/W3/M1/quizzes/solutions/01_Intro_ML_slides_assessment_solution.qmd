@@ -1,0 +1,45 @@
+---
+title: "Assessment Solution Key — Introduction to Machine Learning"
+format: html
+---
+
+## Solution Key
+
+### 1. Define Machine Learning
+
+**Sample answer:** Machine learning is the study of how automated systems can **extract useful patterns from data** automatically. Alternatively (Mitchell-style): a program *learns* from experience $E$ with respect to a task $T$ and performance measure $P$ if its performance on $T$ as measured by $P$ improves with experience $E$.
+
+### 2. Identify the two main tasks in Supervised ML
+
+- **Regression:** predicting a **numerical/continuous** value (e.g., house price, temperature).
+- **Classification:** predicting a **category/class label** (e.g., iris type, spam vs. not spam).
+
+### 3. Identify the two parts of a Data Matrix
+
+- **X (data matrix / features):** the table of input descriptors (columns = features, rows = samples).
+- **y (target):** the quantity or label we want to predict for each observation (one value per row/sample).
+
+### 4. Distinguish Features from Target
+
+- **Features** are the input variables (columns in the data matrix) that describe each observation; the model uses these as input.
+- **Target** is the output we want to predict for each observation (e.g., class label or numeric value). We do not use the target as input; we train the model to predict it from the features.
+
+### 5. Merit of using ML
+
+**Sample answers:** (any one is sufficient)
+
+- We may not know how to write explicit rules for complex patterns (e.g., image content, speech).
+- Patterns can be too numerous or change over time; ML can adapt from data.
+- Data-driven models can capture non-linear and high-dimensional relationships that are hard to hand-code.
+
+### 6. Foundations and related fields
+
+**Sample answers:** Statistics (estimation, inference), optimization (finding best parameters), computer science (algorithms, scalability), artificial intelligence (broader goal of intelligent behavior). Accept any reasonable connection.
+
+### 7. Three main topics of ML
+
+The three main topics are typically:
+
+1. **Supervised learning** — learning from labeled data (e.g., regression, classification).
+2. **Unsupervised learning** — finding structure in data without labels (e.g., clustering, dimensionality reduction).
+3. **Reinforcement learning** — learning from rewards/penalties through interaction with an environment.

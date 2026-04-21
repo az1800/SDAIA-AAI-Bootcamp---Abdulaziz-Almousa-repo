@@ -1,0 +1,203 @@
+---
+title: "Data Quality Profiling"
+format:
+  revealjs:
+    incremental: false
+    slide-level: 2
+---
+
+## Data Quality Profiling
+
+Diagnose data issues and assess whether data fits its intended use.
+
+:::: {.notes}
+In this lecture we focus on profiling as a practical first step before analytics or machine learning.
+::::
+
+---
+
+## Learning Objectives
+
+In this lecture we learn to:
+
+1. Define **data quality profiling** and why it matters
+2. Explain how profiling differs by **data type** (tabular, time-series, text, ...)
+3. Describe how to handle **large datasets** (e.g., sampling)
+4. Use **dataset comparison** to track quality across versions
+5. Understand **data quality alerts** and turn them into next actions
+
+---
+
+## What is Data Quality Profiling?
+
+**Data Quality Profiling** is about:
+
+- diagnosing data issues
+- quantifying quality characteristics
+- deciding whether the data can support analytics or ML reliably
+
+:::: {.notes}
+Think of profiling as an “X-ray” before modeling: it helps you avoid spending compute and time on broken assumptions.
+::::
+
+---
+
+## Profiling Depends on Data Structure
+
+Profiling is different depending on what the data looks like:
+
+- **Tabular** (spreadsheets, database tables)
+- **Time-series** (temporal ordering)
+- **Text** (strings/documents)
+- **Images / Audio / ...** (unstructured modalities)
+
+---
+
+## Tabular Data: What We Profile
+
+For tabular data, profiling typically reports:
+
+- **Distribution statistics** (how values spread)
+- **Central tendencies** (e.g., typical values)
+- **Categorical frequencies** (how categories appear)
+- **Multivariate relationships** (e.g., correlations/interactions)
+- **Missing data patterns**
+
+---
+
+## Time-Series Data: What We Profile
+
+For time-series data, profiling extends to temporal behavior:
+
+- **trends** (overall direction over time)
+- **seasonality** (recurring patterns)
+- **cyclic / periodic patterns**
+- **volatility and anomalies**
+- **missing gaps** across the timeline
+
+---
+
+## Text Data: What We Profile
+
+For text data, profiling focuses on language signals:
+
+- **word frequency distributions**
+- **common phrases / n-grams**
+- **unique word usage**
+- text-level anomalies (e.g., unusual lengths) when relevant
+
+---
+
+## Large Datasets: Use Sampling
+
+If profiling is expensive, use a subset that preserves representativity:
+
+```python
+# Sample 5% of the data
+sample = large_dataset.sample(frac=0.05)
+
+# Sample 10,000 rows only
+sample = large_dataset.sample(10_000)
+```
+
+:::: {.notes}
+Goal: reduce computation while still approximating the full dataset’s quality characteristics.
+::::
+
+---
+
+## Dataset Comparison
+
+Compare multiple versions of the *same* dataset to learn what changed:
+
+- different time periods (e.g., `Y2025` vs `Y2026`)
+- ML datasets (`train` vs `validation` vs `test`)
+- quality impact of transformations (e.g., imputation/augmentation)
+
+---
+
+## Data Quality Alerts (Quick Diagnostic)
+
+- some alerts target **individual columns**
+- others target **relationships** between columns
+- others are **dataset-wide**
+
+:::: {.notes}
+An alert suggests a potential problem; it still needs **domain validation** to confirm impact.
+::::
+
+---
+
+## Alert Types at a Glance
+
+- **Univariate distribution issues**
+  - `Missing Values`, `Infinite Values`
+  - `Constant`, `Zeros`
+  - `High Cardinality`, `Imbalance`, `Skewness`
+  - `Uniform`, `Constant length`
+- **Inter-column / structural issues**
+  - `High Correlation`
+  - `Rejected` (mixed types / non-informative variable)
+  - `Unsupported` (cannot be analyzed as-is)
+- **Dataset-level issues**
+  - `Duplicates`
+  - `Empty`
+
+---
+
+## From Alerts to Actions (Profiling Loop)
+
+Use alerts to drive a clean, repeatable workflow:
+
+1. **Profile** the data (or its dataset versions)
+2. **Review alerts** and prioritize high-impact ones
+3. **Investigate root causes** (including domain validation)
+4. **Apply preprocessing** (impute, encode, clean, filter, ...) 
+5. **Re-profile** to confirm improvements
+
+---
+
+## Representative Column Checks
+
+Common column-level alerts often map to straightforward rules, for example:
+
+```python
+def has_missing(series):
+    return series.isna().any()
+
+def is_constant(series):
+    # ignoring NaNs: a constant column should have 1 unique non-missing value
+    return series.nunique(dropna=True) == 1
+```
+
+These checks help you decide where to impute, drop, or transform features.
+
+---
+
+## Representative Dataset-Level Checks
+
+Some quality problems are broader than one column.
+
+Examples:
+
+- **Duplicates**: too many repeated rows
+- **High correlation**: redundant features (model may waste capacity)
+- **Empty**: nothing to analyze
+
+```python
+DUPLICATE_THRESHOLD = 10
+num_duplicates = df.duplicated().sum()
+alert_duplicates = num_duplicates > DUPLICATE_THRESHOLD
+```
+
+---
+
+## Takeaways
+
+- Profiling is a **first step** to diagnose data before analytics/ML
+- The profiling strategy changes with the **data structure**
+- For big datasets, **sampling** enables scalable inspection
+- Use **dataset comparison** to track quality drift across versions
+- Convert **data quality alerts** into a loop: clean → transform → re-profile
+
+Checkout: [Data Quality Cheatsheet](../texts/text_data_quality_profiling.qmd) which is based on [ydata.ai](https://docs.profiling.ydata.ai/latest/) profiling library.

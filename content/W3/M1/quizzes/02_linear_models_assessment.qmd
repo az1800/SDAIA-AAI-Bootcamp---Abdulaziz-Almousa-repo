@@ -1,0 +1,35 @@
+---
+title: "Assessment — Linear Models"
+format: html
+---
+
+## Questions
+
+Answer the following questions to assess your understanding of the lesson.
+
+### 1. Code for modeling the relationship between two variables
+
+Which scikit-learn class do you use to model a **numerical** relationship between one or more input variables and a continuous target? Write the typical import line and the line to create the model object.
+
+### 2. Map target data type to model type
+
+For each target type below, which scikit-learn model class is appropriate: `LinearRegression` or `LogisticRegression`?
+
+- (a) Predicting whether an email is spam or not.
+- (b) Predicting the selling price of a house (in dollars).
+
+### 3. Given a target variable, identify which model to use
+
+You have a dataset with features (e.g., age, income, credit score) and a target that indicates whether a loan was approved (Yes/No). Which type of model should you use: linear regression or logistic regression? Justify in one sentence.
+
+### 4. Identify dependent and independent variable on a 2D plot
+
+In a 2D scatter plot used for regression (e.g., one feature on the x-axis, target on the y-axis), which axis typically represents the **dependent** variable and which the **independent** variable? Why?
+
+### 5. Regression line vs. decision boundary
+
+What is the difference between a **regression line** (from linear regression) and a **decision boundary** (from logistic regression)? Describe what each represents in one sentence.
+
+### 6. When linear models don't fit well
+
+What do we mean by **linear separability** in the context of classification? When would a linear model (e.g., logistic regression) **not** fit the data well?

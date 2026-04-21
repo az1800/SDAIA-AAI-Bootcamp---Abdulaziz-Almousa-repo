@@ -1,0 +1,207 @@
+---
+title: "Applied Data Science Course"
+format: "html"
+---
+
+## Module 1: Introductions
+
+Learning outcomes:
+
+1. Define Data Science
+2. Identify the three circles that make up Data Science
+3. Recognize the three roles that a Data Scienist takes on
+4. Distinguish between Data Engineers, Data Analysts and Machine Learning Engineers
+5. Define Data Analysis
+6. Distinguish between CDA and EDA and give one example for each
+7. Recognize that outliers can actually inform our investigation and are not to be treated as random noise or errors
+
+Lessons and labs:
+
+1. [Introduction to Data Science Processes and Roles](./M1/lessons/01_slides_intro.qmd)
+2. [Lab 1: Confirmatory Data Analysis (CDA)- blind typing experiment](./M1/lessons/02_lab_cda_blind_typing.ipynb) (15m read)
+3. [Lab 2: Exploratory Data Analysis (EDA)- US Census 2010-2019](./M1/lessons/03_lab_eda_census.ipynb) (30m read)
+
+#### Exercises
+
+1. [John Snow](./M1/exercises/john_snow.qmd) (3 questions)
+2. [Review Quiz NotebookLM](https://notebooklm.google.com/notebook/8e9ff4ca-2054-48d5-b0d3-120db7d965f8?artifactId=f7631507-8fba-427b-991b-962a13bad964) (10 questions)
+
+## Module 2: Data Wrangling
+
+Learning outcomes:
+
+1. Explain the roles of `DataFrame` and `Series` in pandas and inspect basic metadata (`head`, `tail`, `info`, `dtypes`, `index`, `columns`)
+2. Load tabular data into pandas from local files and URLs, and construct a `DataFrame` from Python data structures
+3. Select and filter data using column selection, boolean masks, combined conditions, and label/position indexing with `loc` and `iloc`
+4. Create and transform columns using vectorized operations, including deriving new columns, dropping columns, and renaming columns
+5. Compute descriptive statistics with methods such as `mean`, `median`, `describe`, and `agg`, while interpreting grouped summaries
+6. Aggregate data by one or more categories using `groupby` and count category frequencies with `value_counts`
+7. Apply custom functions table-wise, row/column-wise, and element-wise using `pipe`, `apply`, and `map`
+
+Lessons and labs:
+
+1. [Lab: Pandas Essentials](./M2/lessons/01_pd_dataframe.ipynb)
+2. [Lab: Summary Statistics](./M2/lessons/02_pd_agg.ipynb)
+3. [Lab: Reshaping DataFrames)](./M2/lessons/03_pd_reshape.ipynb)
+4. [Example: Bike Sharing](./M2/lessons/04_lab_bike_sharing.ipynb)
+5. [Lab: Timeseries](./M2/lessons/05_pd_timeseries.ipynb)
+6. [Lab: Function application](./M2/lessons/06_pd_function_application.ipynb)
+
+#### Exercises
+
+1. Getting to Know your Data:
+    1. [World Food Facts](https://github.com/HassanAlgoz/pandas_exercises/blob/master/01_Getting_%26_Knowing_Your_Data/World_Food_Facts/Exercises.ipynb)
+    2. [Chipotle](https://github.com/HassanAlgoz/pandas_exercises/blob/master/01_Getting_%26_Knowing_Your_Data/Chipotle/Exercises.ipynb)
+    3. [Occupation](https://github.com/HassanAlgoz/pandas_exercises/blob/master/01_Getting_%26_Knowing_Your_Data/Occupation/Exercises.ipynb)
+2. Filtering and Sorting Data
+    1. [Chipotle](https://github.com/HassanAlgoz/pandas_exercises/blob/master/02_Filtering_%26_Sorting/Chipotle/Exercises.ipynb)
+    2. [Euro12](https://github.com/HassanAlgoz/pandas_exercises/blob/master/02_Filtering_%26_Sorting/Euro12/Exercises.ipynb)
+    3. [Fictional Army](https://github.com/HassanAlgoz/pandas_exercises/blob/master/02_Filtering_%26_Sorting/Fictional_Army/Exercise.ipynb)
+3. Group By
+    1. [Alcohol Consumption](https://github.com/HassanAlgoz/pandas_exercises/blob/master/03_Grouping/Alcohol_Consumption/Exercise.ipynb)
+    2. [Occupation](https://github.com/HassanAlgoz/pandas_exercises/blob/master/03_Grouping/Occupation/Exercise.ipynb)
+    3. [Regiment](https://github.com/HassanAlgoz/pandas_exercises/blob/master/03_Grouping/Regiment/Exercises.ipynb)
+
+#### Bonus Exercises
+
+4. Apply
+    1. [Students Alcohol Consumption](https://github.com/HassanAlgoz/pandas_exercises/blob/master/04_Apply/Students_Alcohol_Consumption/Exercises.ipynb)
+    2. [US_Crime_Rates](https://github.com/HassanAlgoz/pandas_exercises/blob/master/04_Apply/US_Crime_Rates/Exercises.ipynb)
+5. Merge
+    1. [Auto_MPG](https://github.com/HassanAlgoz/pandas_exercises/blob/master/05_Merge/Auto_MPG/Exercises.ipynb)
+    2. [Fictitious Names](https://github.com/HassanAlgoz/pandas_exercises/blob/master/05_Merge/Fictitous_Names/Exercises.ipynb)
+    3. [House Market](https://github.com/HassanAlgoz/pandas_exercises/blob/master/05_Merge/Housing_Market/Exercises.ipynb) 
+6. Stats
+    1. [US_Baby_Names](https://github.com/HassanAlgoz/pandas_exercises/tree/master/06_Stats/US_Baby_Names/Exercises.ipynb)
+    2. [Wind_Stats](https://github.com/HassanAlgoz/pandas_exercises/tree/master/06_Stats/Wind_Stats/Exercises.ipynb)
+7. Time Series
+    1. [Apple_Stock](https://github.com/HassanAlgoz/pandas_exercises/blob/master/09_Time_Series/Apple_Stock/Exercises.ipynb)
+    2. [Getting_Financial_Data](https://github.com/HassanAlgoz/pandas_exercises/blob/master/09_Time_Series/Getting_Financial_Data/Exercises.ipynb)
+    3. [Investor_Flow_of_Funds_US](https://github.com/HassanAlgoz/pandas_exercises/blob/master/09_Time_Series/Investor_Flow_of_Funds_US/Exercises.ipynb)
+
+#### Videos
+
+If you like walkthroughs, follow this [YouTube Playlist](https://www.youtube.com/playlist?list=PLgJhDSE2ZLxaY_DigHeiIDC1cD09rXgJv) which go through the exercises as well.
+
+## Module 3: Statistical Analysis
+
+### M3-1: Univariate Analysis
+
+Learning outcomes:
+
+1. Identify the two types of statistics
+2. Distinguish between Population and Sample
+3. Given a dataset, identify the numerical and categorical variables
+4. Show statistics like: *Proportion*, *Mean* an *Variance* (and calculate them)
+5. Identify the two two key elements that describe a Distribution, (and calculate them)
+6. Describe different shapes of distributions using terms like: normal/gaussian, uniform, skewed, and exponential
+7. Give at least 2 examples of normally distributed data
+8. Give at least 1 example of non-normally distributed data (e.g., exponential)
+9. Explain what a *Percentile* means in layman terms; (and calculate them).
+10. Explain what is 1, 2, and 3 standard deviations mean for a normal distribution (and calculate them)
+11. Given a box-and-whiskers plot, identify its graphical elements and tell what they mean
+12. Given a plot make general statements about the samples using words like: "most", "few"
+13. Given a general statement about a samples, verify whether it is true or not
+14. Name at least 2 outlier-removal methods and explain how they work
+
+Lessons:
+
+- [Lesson: Statistics](./M3/lessons/01_slides_statistics.qmd)
+- [Lab: Univariate Analysis](./M3/lessons/01_univariate.ipynb)
+
+#### Exercises
+
+1. [Exercise](./M3/exercises/m3-1_exercise.ipynb)
+
+### M3-2: Statistical Visualizations
+
+Learning outcomes:
+
+1. Distinguish between figure and axes in matplotlib
+2. Name the three figure-level functions in seaborn
+3. Distinguish between Histogram and Barplot
+4. Given a DataFrame, make subplots via the `col` and `row` parameters in a figure-level function
+5. Given a DataFrame, make subplots and put custom plots using axes-level functions; and have them do `sharex=True` or `sharey=True`
+6. Given a dataset, write code to show a box plot
+7. Given a dataset, write code to show two distributions on the same figure axes
+8. Given a DataFrame, plot the ECDF and interpret it
+9. Given a DataFrame, plot a bi-variate histogram and interpret it
+10. Visualize numerical vs categorical relationships using `sns.catplot()`
+11. Visualize multiple categorical variables in one plot
+12. Use different colors, markers, and styles in a plot
+13. Relate variables using scatter plot
+14. Identify issues in a given visualization and suggest improvements
+
+Lessons and labs:
+
+1. [Data Visualization](./M3/lessons/02_data_viz.ipynb)
+
+#### Exercises
+
+1. [Exercise](./M3/exercises/m3-2_exercise.ipynb)
+2. [Visualization Exercises](./M3/exercises/viz_exercises.ipynb)
+
+## Module 4: Inferential Statistics
+
+### M4-1: Hypothesis Testing
+
+Learning outcomes:
+
+1. Distinguish between *Inferential* and *Descriptive* Statistics
+2. Distinguish between *Null* and *Alternative* Hypothesis
+3. Recognize anecdotal evidence as such
+4. Given a statement, define the null and alternative hypothesis to setup the statistical testing procedure
+5. Explain what failing to reject the null hypothesis means
+6. Given an alternative hypothesis select the correct statistical test
+7. Intrepret the result of a statistical test (p-value)
+8. Understand that alpha (the significance level) is selected by  convention to have the value of `0.05`
+9. Distinguish between *Treatment* and *Control* Groups
+10. Given a claim in layman terms, describe it in statistical terms, as a hypothesis
+11. Given a hypothesis in statistical terms, explain it in layman terms
+12. Recognize when the test is two-sided or one-sided (and in which direction)
+
+Lessons:
+
+- [Lab: Hypothesis Testing](./M3/lessons/03_hypothesis_testing.ipynb)
+
+
+### M4-2: Bivariate Analysis
+
+Learning outcomes:
+
+1. Distinguish between correlation and association
+2. Interpret a give correlation coefficient $r$
+3. Given a correlation coefficient $r$ map it to a scatter plot
+4. Use `sns.pairplot(kind="reg")` to plot pairwise relationships in a datset
+5. Explain correlation is not causation with an example
+6. Demonstrate knowledge of how to find out if a variable may be confounding
+7. Give an example where a variable is found not to be confounding
+8. Recognize how Chi-square test and Cramer's value are used together
+9. Find the association between two categorical variables in terms of both: significance and strength
+10. Use `histplot(discrete=True)` to plot proportions of categroical variables
+11. Calculate the contingency table and plot the heatmap
+
+Lessons:
+
+- [Lab: Bivariate Analysis](./M3/lessons/04_bivariate.ipynb)
+
+#### Exercises
+
+1. [Hypothesis Testing](./M4/exercises/hypothesis_ex.ipynb) (4 questions)
+
+
+## Projects
+
+All three projects are required, but only one will be selected to present:
+
+- [Project 1: Fast Food Marketing Campaign A/B Test](./Project/p1/p1_fast_food.qmd)
+- [Project 2: Student Exam Performance Factors](./Project/p2/p2_student_exam.qmd)
+- [Project 3: Global Mental Health Crisis Index 2026](./Project/p3/p3_GMHCI-2026.qmd)
+
+See [Project Notebook Presentation](./Project/presentation.qmd).
+
+## References
+
+- https://openintro-ims.netlify.app/
+- https://www.coursera.org/professional-certificates/google-advanced-data-analytics
+- https://www.kaggle.com/learn/data-visualization

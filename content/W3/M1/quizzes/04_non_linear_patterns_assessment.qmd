@@ -1,0 +1,33 @@
+---
+title: "Assessment — Non-linear Patterns"
+format: html
+---
+
+## Questions
+
+Answer the following questions to assess your understanding of the lesson.
+
+### 1. Linear vs. non-linear relationships
+
+In the context of regression, what is the difference between a **linear** and a **non-linear** relationship between a feature and the target? Give a simple example of each (e.g., how the target might depend on a single feature).
+
+### 2. Fit non-linear patterns using non-linear models
+
+Name one way to fit a **non-linear** relationship between features and target without changing the feature space. (That is: using a model that is inherently non-linear.)
+
+### 3. Fit non-linear patterns with PolynomialFeatures
+
+How can you use **linear** regression (e.g., `LinearRegression`) to fit a **non-linear** relationship by using scikit-learn’s `PolynomialFeatures`? Describe the idea in one or two sentences (e.g., what you add before the linear model).
+
+### 4. Fit non-linear patterns with SplineTransformer
+
+Besides polynomial features, the lesson uses **SplineTransformer**. In one sentence, what does `SplineTransformer` do to the input feature(s) so that a linear model can capture non-linear patterns?
+
+### 5. Decision Trees and SVMs as non-linear models
+
+The lesson mentions **Decision Trees** and **Support Vector Machines** as non-linear models.
+
+- (a) Why is a Decision Tree considered a non-linear model?
+- (b) In what sense can an SVM be non-linear (e.g., with certain kernels)?
+
+Give a brief answer for each.

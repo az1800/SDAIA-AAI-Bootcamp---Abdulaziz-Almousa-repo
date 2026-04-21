@@ -1,0 +1,36 @@
+---
+title: "Assessment — Introduction to Machine Learning"
+format: html
+---
+
+## Questions
+
+Answer the following questions to assess your understanding of the lesson.
+
+### 1. Define Machine Learning
+
+In your own words, provide a concise definition of *machine learning* that captures the idea of learning from experience.
+
+### 2. Identify the two main tasks in Supervised ML
+
+What are the two main tasks in **supervised** machine learning? Name each and briefly describe what the model predicts in each case.
+
+### 3. Identify the two parts of a Data Matrix
+
+In the context of a data matrix used for supervised learning, what are the two main parts (components) we work with? Give their typical mathematical names (e.g., as used in notation).
+
+### 4. Distinguish Features from Target
+
+Explain the difference between **features** and **target** in a supervised learning setting. Which one do we use as input to the model, and which one do we try to predict?
+
+### 5. Merit of using ML
+
+Give one practical reason why we use machine learning instead of hand-crafting rules for every pattern we care about.
+
+### 6. Foundations and related fields
+
+Name one field or discipline that machine learning builds upon or is closely related to, and briefly say how it connects.
+
+### 7. Three main topics of ML
+
+What are the three main topics (or categories) of machine learning typically covered in an introductory course? List them.

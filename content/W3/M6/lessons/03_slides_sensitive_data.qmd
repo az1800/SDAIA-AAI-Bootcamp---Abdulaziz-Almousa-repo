@@ -1,0 +1,192 @@
+---
+title: "Sensitive Data"
+format:
+  revealjs:
+    incremental: false
+    slide-level: 2
+---
+
+## Sensitive Data
+
+Some contexts make it unsafe to share a report that includes even a **sample** of records.
+
+:::: {.notes}
+Examples: private health records, political data, and financial data.
+::::
+
+---
+
+## Why It Matters
+
+Sharing data can violate privacy constraints when a dataset contains sensitive fields.
+
+Examples:
+
+- `salary`
+- `medical_diagnosis`
+- `political_contribution`
+- `account_balance`
+
+---
+
+## What Counts as PII?
+
+**Personal Identifiable Information (PII)** is information that can be used to identify an individual.
+
+It can include:
+
+- names
+- addresses
+- phone numbers
+- social security numbers
+- email addresses
+- financial information
+
+---
+
+## Regulations to Know
+
+Many regions require organizations to handle PII responsibly, for example:
+
+- `GDPR`
+- `CCPA`
+- `HIPAA`
+
+:::: {.notes}
+In practice, regulation maps to process: what you collect, how you store it, and what you share.
+::::
+
+---
+
+## Direct Identifiers (PII)
+
+These directly identify a person.
+
+- `name`
+- `email`
+- `national_id`
+- `phone_number`
+- `credit_card_number`
+
+---
+
+## Quasi-Identifiers
+
+These are not always unique alone, but can identify a person **in combination**.
+
+- `zip_code`
+- `date_of_birth`
+- `gender`
+- `last_name`
+
+---
+
+## Handle Sensitive Data (Goal)
+
+Use sensitive data safely:
+
+- protect individual records
+- keep the dataset useful enough for analysis
+
+---
+
+## A) Exclusion / Dropping
+
+**Remove** columns that contain sensitive information when they are not needed for the specific analysis/report.
+
+```python
+# Assuming 'df' is your DataFrame
+df.drop(columns=["email", "phone_number"], inplace=True)
+```
+
+---
+
+## B) Masking
+
+Replace sensitive values with non-informative content or a fixed placeholder.
+
+Benefits:
+
+- preserves column structure
+- makes it obvious that concealment happened
+
+```python
+# show only the last 3 digits
+df["phone_number"] = df["phone_number"].apply(lambda x: x[-3:])
+```
+
+---
+
+## C) Hashing
+
+Transform sensitive identifiers (one-way) into a **fixed-length hashed value**.
+
+- enables consistent tracking/merging
+- original value cannot be recovered from the hash
+
+```python
+import hashlib
+
+df["client_id_hash"] = df["client_id"].astype(str).apply(
+    lambda x: hashlib.sha256(x.encode()).hexdigest()
+)
+```
+
+---
+
+## D) Pseudonymization
+
+Replace real identifiers with randomly generated pseudonyms.
+
+Outcome:
+
+- direct link to identity is broken
+- relationships between records for analysis remain
+
+```python
+from faker import Faker
+
+fake = Faker()
+df["name"] = df["name"].apply(lambda x: fake.name())
+```
+
+---
+
+## E) Aggregation
+
+Convert individual sensitive records into **summary statistics** by group.
+
+Examples:
+
+- counts
+- means
+- sums
+
+```python
+df_agg = df.groupby("age_group")["salary"].mean().reset_index()
+```
+
+---
+
+## F) Generalization
+
+Reduce the precision of quasi-identifiers by replacing exact values with broader ranges/categories.
+
+Examples:
+
+- exact age -> age range
+- full ZIP -> regional prefix
+
+```python
+bins = [0, 18, 35, 60, 100]
+labels = ["0-18", "19-35", "36-60", "61+"]
+df["age_group"] = pd.cut(df["age"], bins=bins, labels=labels)
+```
+
+---
+
+## Takeaways
+
+- Sensitive data sharing can be unsafe even when you share “just a sample”.
+- Classify fields as `PII`, then distinguish `direct identifiers` from `quasi-identifiers`.
+- Choose a protection strategy (dropping, masking, hashing, pseudonymization, aggregation, generalization) based on the analysis goal.

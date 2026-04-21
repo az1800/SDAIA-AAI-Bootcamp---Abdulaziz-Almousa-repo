@@ -1,0 +1,129 @@
+---
+title: "Classifier Threshold Tuning"
+format:
+  revealjs:
+    incremental: false
+    slide-level: 2
+---
+
+## Learning Objectives
+
+In this lecture we learn to:
+
+1. Identify when you should trade Recall for Precision (and vice-versa)
+2. Identify the fitted-classifier component that controls this trade-off: the **decision threshold**
+3. Tune a classifier to maximize **precision** or **recall**
+4. Tune a classifier to optimize for a **domain cost ratio** between `FN` and `FP`
+
+::::: {.notes}
+We will treat threshold tuning as “last-mile” decision optimization that sits on top of an already-trained model.
+::::
+
+---
+
+## Why Tune the Classification Threshold?
+
+Real decision-making often has asymmetric error costs.
+
+Example (medical screening):
+
+- **Cost** of $FN$ is higher than the cost of $FP$.
+- **Strategy:** shift the decision threshold **below 0.5** so more cases are predicted positive (more coverage, more false alarms).
+- **Priority:** maximize **Recall**.
+- **Trade-off:** you accept lower Precision to reduce missed positives.
+
+---
+
+## What Component Changes When We Tune?
+
+For the same trained model, tuning changes the final “gate”:
+
+- The model produces continuous scores (probabilities or distances).
+- `predict()` applies a hard cutoff to produce labels.
+- Moving the threshold changes:
+  - how many points become predicted positive
+  - which confusion matrix errors (`FP` vs `FN`) dominate
+
+---
+
+## Setup: Diabetes Dataset
+
+- Dataset is used to illustrate threshold tuning.
+- The target labels are mapped into:
+  - `tested_positive` as the positive class
+  - `tested_negative` as the negative class
+- There is slight class imbalance, so interpret metrics with care.
+- Split data safely (train/test split with stratification) to prevent leakage when tuning.
+
+---
+
+## Vanilla Classifier (Default Threshold = 0.5)
+
+- Base model: `StandardScaler` + `LogisticRegression` (with class weights in “balanced” mode).
+- Evaluate with cross-validation scoring for a single fixed decision threshold:
+  - accuracy
+  - precision
+  - recall
+- Key observation:
+  - training and testing scores are close (no obvious overfitting)
+
+---
+
+## Tune the Decision Threshold with `TunedThresholdClassifierCV`
+
+`TunedThresholdClassifierCV` is a meta-estimator that tunes the threshold for a chosen metric using CV.
+
+Key relationships:
+
+- Precision is proportional to being “strict” about positive predictions.
+- Recall improves when you become more inclusive about positives.
+
+In the notebook experiment:
+
+- tuning for **recall** increased recall substantially
+- precision decreased because the model predicts more positives
+
+::::: {.notes}
+The fitted coefficients of the underlying model do not change; only the threshold changes.
+::::
+
+---
+
+## Same Model, Different Gate
+
+- The tuned model is internally the same model as the vanilla one.
+- They share the same fitted coefficients.
+- What changes is only the decision threshold learned during cross-validation.
+
+This is why threshold tuning is often a targeted “control knob” for error trade-offs.
+
+---
+
+## Tune to Domain Metrics (FN vs FP Cost)
+
+Instead of picking a metric like precision or recall directly, use a cost ratio:
+
+- Weigh `FN` and `FP` by how costly each error is.
+- Then choose the threshold that minimizes net cost (or maximizes negative cost).
+
+Notebook example:
+
+- strict cost ratio: `FN` penalty = 5, `FP` penalty = 1 (FN is much more costly).
+
+Implementation idea:
+
+- build a custom scorer with `make_scorer(..., greater_is_better=False)`
+- run threshold tuning so CV selects the threshold that optimizes the cost objective
+
+---
+
+## Key Takeaways
+
+- Threshold tuning is last-mile decision optimization on top of a trained classifier.
+- Pick thresholds to match your error costs:
+  - maximize recall if missing positives is expensive
+  - maximize precision if false alarms are expensive
+  - optimize a cost function when you know FN/FP trade-off in domain terms
+- Always prevent data leakage:
+  - split first (train/test), then tune using only training data with CV.
+

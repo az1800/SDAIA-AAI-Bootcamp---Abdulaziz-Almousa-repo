@@ -1,0 +1,23 @@
+---
+title: "Project 2: Student Exam Performance"
+format: html
+---
+
+## Scenario
+
+This dataset show the student-related academic, lifestyle, and socio-enconmic factores that include exam perdormance. It include study hours, student attendence, sleep hours, motivation, tutoring sessions, parental involvement, school type and other environmental features. The main target varibale is Exam_Score which represents the student final exam score.
+
+- Rows: 6607
+- Columns: 20
+
+## Goal
+
+Inspect the dataset and make assumptions, then start exploring the relationships in this data, noting your observations below the calculated summary statistics and visualizations you produce.
+
+Verify any hypothesis you came up with during exploration, using statistical tests.
+
+Finally, conclude with at least 7 insights.
+
+## Load Dataset
+
+[Dataset Hosted at: Kaggle | by Muhammad Shoaib](https://www.kaggle.com/datasets/grandmaster07/student-exam-performance-dataset-analysis) and has been downloaded to `StudentPerformanceFactors.csv`.

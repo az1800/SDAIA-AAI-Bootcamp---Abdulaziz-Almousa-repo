@@ -1,0 +1,23 @@
+---
+format: html
+toc-depth: 2
+---
+
+Learning end-goals:
+
+1. Use data to fine-tune foundation AI models
+  - Data curation: what is labelled and which tech is used to label
+  - Inference: speed, cost, performance metric
+  - Fine-tuning time, cost, and performance tradeoff
+2. Specify the technical requirements for AI integration
+3. Make a decision matrix and select the most fit AI solution
+4. Given a business process, evaluate the need for AI
+
+Topics:
+
+- [Introduction to LLM-based NLP and HuggingFace](./M1/slides/01_Introduction_to_LLM-based_NLP.qmd)
+- [Pipelines](./M1/slides/02_pipelines.qmd)
+- [User Interface](./M1/slides/03_ui.qmd)
+- [LLMs](./M1/slides/04_llms.qmd)
+- [Fine-tuning Intro](./M1/slides/05_fine-tuning.qmd)
+

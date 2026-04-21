@@ -1,0 +1,294 @@
+---
+title: "Classification Threshold Widget"
+format: html
+---
+
+This widget includes three toy datasets:
+
+- **Separated**, where positive examples and negative examples are generally well differentiated, with most positive examples having higher scores than negative examples.
+- **Unseparated**, where many positive examples have lower scores than negative examples, and many negative examples have higher scores than positive examples.
+- **Imbalanced**, containing only a few examples of the positive class.
+
+Try:
+
+- Move the classification threshold fully to the right. What do you observe?
+- Move the classification threshold fully to the left. What do you observe?
+- Where would you say is the right cut-off point for the imbalanced data case? Is it higher or lower than 0.5?
+
+```{ojs}
+// |echo: false
+// |code-fold: true
+
+viewof classificationTool = {
+  // 1. Data Generation Logic (no "magic," just mapping distributions)
+  const generate = (type) => {
+    const points = [];
+    for (let i = 0; i < 120; i++) {
+      let actualPositive, prob;
+      if (type === 'separated') {
+        actualPositive = i < 60;
+        prob = actualPositive ? 0.6 + (Math.random() * 0.4) : Math.random() * 0.4;
+      } else if (type === 'unseparated') {
+        actualPositive = i < 60;
+        prob = actualPositive ? 0.3 + (Math.random() * 0.6) : 0.1 + (Math.random() * 0.6);
+      } else { // imbalanced (skewed distribution)
+        actualPositive = i < 12;
+        prob = actualPositive ? 0.5 + (Math.random() * 0.5) : Math.random() * 0.6;
+      }
+      points.push({ 
+        actualPositive, 
+        prob: Math.max(0.02, Math.min(0.98, prob)), 
+        y: 20 + Math.random() * 140 
+      });
+    }
+    return points;
+  };
+
+  // 2. Setup the UI Components
+  const datasetSelect = Inputs.select(
+    new Map([["Separated", "separated"], ["Unseparated", "unseparated"], ["Imbalanced", "imbalanced"]]), 
+    {label: "Dataset", value: "separated"}
+  );
+  const thresholdRange = Inputs.range([0, 1], {step: 0.01, value: 0.5, label: "Threshold"});
+  
+  const container = html`<div style="font-family: var(--sans-serif); border: 1px solid #dadce0; padding: 1.5rem; border-radius: 8px; background: #fff;">
+    <div style="display: flex; gap: 2rem; margin-bottom: 1.5rem; align-items: center;">
+      ${datasetSelect}
+      ${thresholdRange}
+    </div>
+    <div class="vis-area"></div>
+    <div style="display: flex; gap: 3rem; margin-top: 2.5rem; justify-content: space-between;">
+      <div class="roc-area" style="width: 390px;"></div>
+      <div class="pr-area" style="width: 390px;"></div>
+    </div>
+  </div>`;
+
+  const visArea = container.querySelector(".vis-area");
+  const rocArea = container.querySelector(".roc-area");
+  const prArea = container.querySelector(".pr-area");
+  let data = generate(datasetSelect.value);
+
+  // Helper to get metrics across all thresholds for ROC/PR
+  function getCurveMetrics(data) {
+    // Sorted distinct thresholds taken from prob values
+    const thresholds = Array.from(new Set(data.map(d => d.prob))).sort((a, b) => a - b);
+    const results = [];
+    for (let t of thresholds) {
+      let tp = 0, fp = 0, tn = 0, fn = 0;
+      data.forEach(d => {
+        const predPos = d.prob >= t;
+        if (predPos && d.actualPositive) tp++;
+        else if (predPos && !d.actualPositive) fp++;
+        else if (!predPos && !d.actualPositive) tn++;
+        else if (!predPos && d.actualPositive) fn++;
+      });
+      const precision = (tp + fp) > 0 ? tp / (tp + fp) : 1;
+      const recall = (tp + fn) > 0 ? tp / (tp + fn) : 0;
+      const fpr = (fp + tn) > 0 ? fp / (fp + tn) : 0;
+      results.push({threshold: t, tp, fp, tn, fn, precision, recall, fpr});
+    }
+    // Always add t = 0.0/1.0 for curve coverage
+    if (results.length === 0 || results[0].threshold > 0) {
+      let all_pos = data.filter(d => d.actualPositive).length;
+      results.unshift({threshold: 0, tp: all_pos, fp: data.length-all_pos, tn: 0, fn: 0, precision: all_pos/data.length, recall: 1, fpr: 1});
+    }
+    if (results[results.length-1].threshold < 1) {
+      results.push({threshold: 1, tp: 0, fp: 0, tn: data.filter(d=>!d.actualPositive).length, fn: data.filter(d=>d.actualPositive).length, precision: 1, recall: 0, fpr: 0});
+    }
+    return results;
+  }
+
+  // 3. The Update/Render Loop
+  const update = () => {
+    const thresh = thresholdRange.value;
+    const type = datasetSelect.value;
+    
+    // Regenerate data only if the dataset type actually changes
+    if (data._type !== type) {
+      data = generate(type);
+      data._type = type;
+    }
+
+    // Current confusion matrix for the threshold
+    let tp = 0, fp = 0, tn = 0, fn = 0;
+    data.forEach(d => {
+      const predPos = d.prob >= thresh;
+      if (predPos && d.actualPositive) tp++;
+      else if (predPos && !d.actualPositive) fp++;
+      else if (!predPos && !d.actualPositive) tn++;
+      else if (!predPos && d.actualPositive) fn++;
+    });
+
+    // --- Main prediction-score plot ---
+    const plot = html`<svg width="800" height="180" viewBox="0 0 800 180" style="display: block; border: 1px solid #eee; border-radius: 4px;">
+      <rect x="0" y="0" width="${thresh * 800}" height="180" fill="rgba(217, 48, 37, 0.1)" />
+      <rect x="${thresh * 800}" y="0" width="${(1 - thresh) * 800}" height="180" fill="rgba(26, 115, 232, 0.1)" />
+      ${data.map(d => {
+        const x = d.prob * 800;
+        const correct = (d.prob >= thresh) === d.actualPositive;
+        const color = d.actualPositive ? "#1a73e8" : "#d93025";
+        return correct 
+          ? svg`<circle cx="${x}" cy="${d.y}" r="5" fill="${color}" opacity="0.8" />`
+          : svg`<g stroke="${color}" stroke-width="2" opacity="0.9"><line x1="${x-4}" y1="${d.y-4}" x2="${x+4}" y2="${d.y+4}" /><line x1="${x+4}" y1="${d.y-4}" x2="${x-4}" y2="${d.y+4}" /></g>`;
+      })}
+      <line x1="${thresh * 800}" y1="0" x2="${thresh * 800}" y2="180" stroke="#000" stroke-width="2" />
+    </svg>`;
+
+    const table = html`<table style="width: 100%; margin-top: 1.5rem; border-collapse: collapse; text-align: center; font-size: 14px;">
+      <tr style="background: #f1f3f4;"><th style="border: 1px solid #ccc; padding: 10px;"></th><th style="border: 1px solid #ccc; padding: 10px;">Actually Positive</th><th style="border: 1px solid #ccc; padding: 10px;">Actually Negative</th></tr>
+      <tr><th style="background: #f1f3f4; border: 1px solid #ccc; padding: 10px;">Predicted Positive</th><td style="border: 1px solid #ccc; padding: 15px;"><div style="font-size: 11px; color: #666;">True Positive</div><div style="font-size: 24px; font-weight: bold; color: #1e8e3e;">${tp}</div></td><td style="border: 1px solid #ccc; padding: 15px;"><div style="font-size: 11px; color: #666;">False Positive</div><div style="font-size: 24px; font-weight: bold; color: #d93025;">${fp}</div></td></tr>
+      <tr><th style="background: #f1f3f4; border: 1px solid #ccc; padding: 10px;">Predicted Negative</th><td style="border: 1px solid #ccc; padding: 15px;"><div style="font-size: 11px; color: #666;">False Negative</div><div style="font-size: 24px; font-weight: bold; color: #d93025;">${fn}</div></td><td style="border: 1px solid #ccc; padding: 15px;"><div style="font-size: 11px; color: #666;">True Negative</div><div style="font-size: 24px; font-weight: bold; color: #1e8e3e;">${tn}</div></td></tr>
+    </table>`;
+
+    // --- ROC & PR Curve Drawing ---
+    const curves = getCurveMetrics(data);
+
+    // Compute ROC Points
+    const rocPoints = curves.map(pt => ({
+      x: pt.fpr,
+      y: pt.recall,
+      threshold: pt.threshold
+    }));
+
+    // Compute PR Points
+    const prPoints = curves.map(pt => ({
+      x: pt.recall,
+      y: pt.precision,
+      threshold: pt.threshold
+    }));
+
+    // Find point on curve nearest to selected threshold
+    function nearestIndex(arr, value, prop="threshold") {
+      let minDiff = Infinity, idx = 0;
+      for (let i = 0; i < arr.length; ++i) {
+        const diff = Math.abs(arr[i][prop] - value);
+        if (diff < minDiff) { minDiff = diff; idx = i; }
+      }
+      return idx;
+    }
+    const rocIdx = nearestIndex(rocPoints, thresh);
+    const prIdx = nearestIndex(prPoints, thresh);
+
+    // Dims
+    const size = 370, padding = 38, axlen = size - 2*padding;
+    // Scales
+    function scale(val, min, max){ return padding + (val-min)/(max-min)*axlen; }
+
+    // ROC Curve SVG
+    const rocSvg = html`<svg width="${size}" height="${size}" style="border: 1px solid #eee; background: #fcfcfc; border-radius: 4px;">
+      <g>
+        <text x="${padding/2}" y="${padding+8}" font-size="15" font-weight="bold" fill="#444">ROC</text>
+        <text x="${size/2}" y="${size-4}" text-anchor="middle" font-size="12" fill="#888">False Positive Rate</text>
+        <g transform="rotate(-90,${padding-17},${size/2})">
+          <text x="${padding-17}" y="${size/2}" font-size="12" text-anchor="middle" fill="#888">True Positive Rate (Recall)</text>
+        </g>
+      </g>
+      <g>
+        <!-- Axes -->
+        <line x1="${padding}" y1="${size-padding}" x2="${size-padding}" y2="${size-padding}" stroke="#aaa" stroke-width="1.2"/>
+        <line x1="${padding}" y1="${size-padding}" x2="${padding}" y2="${padding}" stroke="#aaa" stroke-width="1.2"/>
+        <!-- Random line -->
+        <line x1="${padding}" y1="${size-padding}" x2="${size-padding}" y2="${padding}" stroke="#ddd" stroke-dasharray="4,4" stroke-width="1"/>
+        <!-- Curve -->
+        <polyline
+          fill="none"
+          stroke="#3080d3"
+          stroke-width="2"
+          points="${rocPoints.map(d => `${scale(d.x,0,1)},${scale(1-d.y,0,1)}`).join(' ')}"
+        />
+        <!-- Markers -->
+        ${rocPoints.map((d,i) => svg`<circle cx="${scale(d.x,0,1)}" cy="${scale(1-d.y,0,1)}" r="2.9" fill="${i===rocIdx ? '#FFAE1A' : '#1977D4'}" stroke="${i===rocIdx ? '#FF9800' : 'none'}" stroke-width="1.2" opacity="${i===rocIdx?1:0.5}"/>`)}
+      </g>
+      <!-- Highlighted point label -->
+      <g>
+        <circle cx="${scale(rocPoints[rocIdx].x,0,1)}" cy="${scale(1-rocPoints[rocIdx].y,0,1)}" r="7.3" fill="none" stroke="#FFAE1A" stroke-width="2.3" opacity="0.96"/>
+        <text x="${scale(rocPoints[rocIdx].x,0,1)+12}" y="${scale(1-rocPoints[rocIdx].y,0,1)-8}" font-size="12" fill="#333">
+          threshold: ${rocPoints[rocIdx].threshold.toFixed(2)}
+        </text>
+        <text x="${scale(rocPoints[rocIdx].x,0,1)+12}" y="${scale(1-rocPoints[rocIdx].y,0,1)+9}" font-size="11" fill="#3080d3">
+          (FPR: ${rocPoints[rocIdx].x.toFixed(2)}, TPR: ${rocPoints[rocIdx].y.toFixed(2)})
+        </text>
+      </g>
+      <!-- Axis ticks and numbers -->
+      <g>
+        ${[0,0.25,0.5,0.75,1].map(tick=>svg`
+          <line x1="${scale(tick,0,1)}" y1="${size-padding}" x2="${scale(tick,0,1)}" y2="${size-padding+7}" stroke="#aaa"/>
+          <text x="${scale(tick,0,1)}" y="${size-padding+21}" font-size="11" text-anchor="middle" fill="#666">${tick}</text>
+        `)}
+        ${[0,0.25,0.5,0.75,1].map(tick=>svg`
+          <line x1="${padding-7}" y1="${scale(1-tick,0,1)}" x2="${padding}" y2="${scale(1-tick,0,1)}" stroke="#aaa"/>
+          <text x="${padding-10}" y="${scale(1-tick,0,1)+4}" font-size="11" text-anchor="end" fill="#666">${tick}</text>
+        `)}
+      </g>
+    </svg>`;
+
+    // PR Curve SVG
+    const prSvg = html`<svg width="${size}" height="${size}" style="border: 1px solid #eee; background: #fcfcfc; border-radius: 4px;">
+      <g>
+        <text x="${padding/2}" y="${padding+8}" font-size="15" font-weight="bold" fill="#444">PR-Curve</text>
+        <text x="${size/2}" y="${size-4}" text-anchor="middle" font-size="12" fill="#888">Recall</text>
+        <g transform="rotate(-90,${padding-17},${size/2})">
+          <text x="${padding-17}" y="${size/2}" font-size="12" text-anchor="middle" fill="#888">Precision</text>
+        </g>
+      </g>
+      <g>
+        <!-- Axes -->
+        <line x1="${padding}" y1="${size-padding}" x2="${size-padding}" y2="${size-padding}" stroke="#aaa" stroke-width="1.2"/>
+        <line x1="${padding}" y1="${size-padding}" x2="${padding}" y2="${padding}" stroke="#aaa" stroke-width="1.2"/>
+        <!-- Curve -->
+        <polyline
+          fill="none"
+          stroke="#DD781C"
+          stroke-width="2"
+          points="${prPoints.map(d => `${scale(d.x,0,1)},${scale(1-d.y,0,1)}`).join(' ')}"
+        />
+        <!-- Markers -->
+        ${prPoints.map((d,i) => svg`<circle cx="${scale(d.x,0,1)}" cy="${scale(1-d.y,0,1)}" r="2.9" fill="${i===prIdx ? '#FFD740' : '#DD781C'}" stroke="${i===prIdx ? '#D49014' : 'none'}" stroke-width="1.2" opacity="${i===prIdx?1:0.5}"/>`)}
+      </g>
+      <!-- Highlighted point label -->
+      <g>
+        <circle cx="${scale(prPoints[prIdx].x,0,1)}" cy="${scale(1-prPoints[prIdx].y,0,1)}" r="7.3" fill="none" stroke="#FFD740" stroke-width="2.3" opacity="0.96"/>
+        <text x="${scale(prPoints[prIdx].x,0,1)+12}" y="${scale(1-prPoints[prIdx].y,0,1)-8}" font-size="12" fill="#333">
+          threshold: ${prPoints[prIdx].threshold.toFixed(2)}
+        </text>
+        <text x="${scale(prPoints[prIdx].x,0,1)+12}" y="${scale(1-prPoints[prIdx].y,0,1)+9}" font-size="11" fill="#e68b00">
+          (Recall: ${prPoints[prIdx].x.toFixed(2)}, Prec: ${prPoints[prIdx].y.toFixed(2)})
+        </text>
+      </g>
+      <!-- Axis ticks and numbers -->
+      <g>
+        ${[0,0.25,0.5,0.75,1].map(tick=>svg`
+          <line x1="${scale(tick,0,1)}" y1="${size-padding}" x2="${scale(tick,0,1)}" y2="${size-padding+7}" stroke="#aaa"/>
+          <text x="${scale(tick,0,1)}" y="${size-padding+21}" font-size="11" text-anchor="middle" fill="#666">${tick}</text>
+        `)}
+        ${[0,0.25,0.5,0.75,1].map(tick=>svg`
+          <line x1="${padding-7}" y1="${scale(1-tick,0,1)}" x2="${padding}" y2="${scale(1-tick,0,1)}" stroke="#aaa"/>
+          <text x="${padding-10}" y="${scale(1-tick,0,1)+4}" font-size="11" text-anchor="end" fill="#666">${tick}</text>
+        `)}
+      </g>
+    </svg>`;
+
+    // --- Render everything ---
+    visArea.innerHTML = "";
+    visArea.append(plot, table);
+    rocArea.innerHTML = "";
+    prArea.innerHTML = "";
+    rocArea.append(rocSvg);
+    prArea.append(prSvg);
+
+    // Set the cell value for external reactivity
+    container.value = {
+      threshold: thresh,
+      dataset: type,
+      metrics: { tp, fp, tn, fn }
+    };
+    container.dispatchEvent(new CustomEvent("input"));
+  };
+
+  datasetSelect.addEventListener("input", update);
+  thresholdRange.addEventListener("input", update);
+
+  update();
+  return container;
+}
+```

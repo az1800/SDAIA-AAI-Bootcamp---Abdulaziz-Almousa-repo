@@ -1,0 +1,33 @@
+---
+title: "Project 1: Fast Food Marketing Campaign A/B Test"
+format: html
+---
+
+## Scenario
+
+A fast-food chain plans to add a new item to its menu. However, they are still undecided between three possible marketing campaigns for promoting the new product. In order to determine which promotion has the greatest effect on sales, the new item is introduced at locations in several randomly selected markets. A different promotion is used at each location, and the weekly sales of the new item are recorded for the first four weeks.
+
+## Goal
+
+Evaluate A/B testing results and decide which marketing strategy works the best.
+
+## Columns
+
+- _MarketID_: unique identifier for market
+- _MarketSize_: size of market area by sales
+- _LocationID_: unique identifier for store location
+- _AgeOfStore_: age of store in years
+- _Promotion_: one of three promotions that were tested
+- _week_: one of four weeks when the promotions were run
+- _SalesInThousands_: sales amount for a specific _LocationID_, _Promotion_, and _week_
+
+## Acknowledgements
+
+1. [https://rpubs.com/ksdwivedy/finalRProject](https://rpubs.com/ksdwivedy/finalRProject)
+2. Hands-On Data Science for Marketing book by Yoon Hyup Hwang
+3. [https://unsplash.com/@shaafi](https://unsplash.com/@shaafi) for the picture
+4. IBM Watson Analytics community for this dataset.
+
+## Load Dataset
+
+[Dataset Hosted on Kaggle](https://www.kaggle.com/datasets/chebotinaa/fast-food-marketing-campaign-ab-test), and has been downloaded to `WA_Marketing-Campaign.csv`.

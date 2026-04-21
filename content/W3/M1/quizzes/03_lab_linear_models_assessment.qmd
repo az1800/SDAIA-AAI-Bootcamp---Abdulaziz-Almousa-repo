@@ -1,0 +1,65 @@
+---
+title: "Assessment — Lab: Linear Models"
+format: html
+---
+
+## Questions
+
+Answer the following questions to assess your understanding of the lab.
+
+### Part 1: Regression
+
+#### 1. Split feature columns from target columns
+
+Given a pandas DataFrame `df` with columns including `"flipper_length_mm"` and `"body_mass_g"`, write one or two lines of code to create `X` (feature matrix) and `y` (target vector) so that `X` has the feature column(s) and `y` has the target. Assume we use only `"flipper_length_mm"` as the feature.
+
+#### 2. Train a regressor (LinearRegression) model
+
+After creating `X` and `y`, write the code to instantiate a `LinearRegression` model and fit it to the data.
+
+#### 3. Inspect learned parameters
+
+After fitting a `LinearRegression` model, which attributes do you use to inspect the **coefficient(s)** and the **intercept**? Give the attribute names.
+
+#### 4. Predict the target for a feature value
+
+How do you obtain the predicted target value(s) for the feature matrix `X` (or for new feature values) using the fitted model? Give the method name.
+
+#### 5. Plot the data scatter plot
+
+Name a library or method you could use to create a scatter plot of the feature (e.g., `flipper_length_mm`) on the x-axis and the target (e.g., `body_mass_g`) on the y-axis.
+
+#### 6. Plot the regression line on the same plot
+
+After fitting a linear regression, how can you add the regression line to the same scatter plot? (Describe in words or give the idea: e.g., plot `model.predict(X)` vs. the feature.)
+
+#### 7. Estimate the model error
+
+Name one common metric used to estimate the error of a regression model (e.g., on the training or test set). What does it measure?
+
+### Part 2: Classification and train-test split
+
+#### 8. Split data into train and test
+
+Given feature matrix `X` and target `y`, write the function call (and typical import) you use to split the data into training and test sets (e.g., 80% train, 20% test). Include the names of the four resulting variables.
+
+#### 9. Justify a held-out test set
+
+Why do we keep a held-out test set instead of evaluating the model only on the training data? Answer in one or two sentences.
+
+#### 10. Explain `stratify=target`
+
+In `train_test_split(..., stratify=y)`, what does the `stratify` parameter do? Why is it especially useful for classification?
+
+#### 11. Train a classifier (LogisticRegression) model
+
+Write the code to instantiate a `LogisticRegression` classifier and fit it using the training feature matrix and training target vector (you may use names like `X_train`, `y_train`).
+
+#### 12. predict vs. predict_proba with DecisionBoundaryDisplay
+
+When viewing a `DecisionBoundaryDisplay` for a classifier:
+
+- What does **`predict`** output for each point in the grid (e.g., a single value per point)?
+- What does **`predict_proba`** output for each point (e.g., shape or meaning)?
+
+Briefly distinguish the two.

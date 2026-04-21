@@ -1,0 +1,426 @@
+---
+format: html
+title: "Applied Machine Learning"
+subtitle: "Building Predictive ML Pipelines with Scikit-learn"
+mermaid-format: svg
+toc-depth: 2
+---
+
+By the end of this course, you should be able to: 
+
+1. Build **regression models** that use recorded data to estimate unknown data and make forecasts
+1. Build **classifier models** that can inform decision making in medical and business settings
+1. Build **reliable data pipelines** with robust pre-processing, post-processing with data quality and **privacy** in mind
+1. Analyze various **modeling issues** and **data quality issues**, debug them, and avoid blind-spots that fail many practitioners silently
+1. Apply **meta-learning** to search and automatically select the best model, from a set of models, for a given task
+1. Apply XAI to **explain model predictions** and feature importance using general methods that apply to all types of predictive models
+
+## Module 1: Linear Models
+
+### M1-1: Introduction to ML
+
+::: {.columns}
+::: {.column}
+Learning outcomes:
+
+1. Define *Machine Learning* and understand its utility
+1. Identify the two main tasks in *Supervised ML*
+1. Identify the two parts of a *Data Matrix*
+1. Distinguish *Features* from *Target*
+1. Recognize foundations and related fields
+1. Recognize the three main topics of ML
+:::
+::: {.column}
+**Materials:**
+
+- [🧬 Slides: Introduction](M1/lessons/01_slides_Intro_ML.qmd) (1 hour)
+:::
+:::
+<!-- end columns -->
+
+### M1-2: Linear Models
+
+::: {.columns}
+::: {.column}
+Learning outcomes:
+
+1. Given a DataFrame, split the feature columns from the target columns
+1. Train a regressor (`LinearRegression`) model
+1. Inspect the learned parameters of the model
+1. Predict the target for any feature value
+1. Plot the data scatter plot
+1. Plot the linear regression line on the same plot
+1. Estimate the model error
+1. Given a (features-target) split, further split the data into (train-test)
+1. Justify having a held-out set for testing
+1. Explain what the `stratify=target` parameter does
+1. Train a classifier (`LogisticRegression`) model
+1. Given a `DecisionBoundaryDisplay` distinguish between a classifier's `predict` and `predict_proba` methods
+:::
+::: {.column}
+**Materials:**
+
+- [🧬 Slides: Linear Models](M1/lessons/02_slides_linear_models.qmd) (45m)
+- [🔬 Lab: Linear Models](M1/lessons/03_lab_linear_models.ipynb) (45m)
+
+**Resources**:
+
+- [https://scikit-learn.org/](https://scikit-learn.org/)
+
+#### Exercises
+
+- [✍️ Model Hours vs Marks](M1/exercises/ex1_reg.ipynb) (3hr)
+- [✍️ Model Experience vs Salary](M1/exercises/ex2_reg.ipynb) (30m)
+:::
+:::
+<!-- end columns -->
+
+### M1-3: Non-linear Patterns
+
+::: {.columns}
+::: {.column}
+Learning outcomes:
+
+1. Distinguish between linear and non-linear relationships.
+1. Fit non-linear patterns using non-linear models.
+1. Fit non-linear patterns using linear models with `PolynomialFeatures`.
+1. Fit non-linear patterns using linear models with `SplineTransformer`.
+1. Recognize Decision Trees and Support Vector Machines as non-linear models.
+:::
+::: {.column}
+**Materials:**
+
+- [🧬 Slides: Non-linear patterns](M1/lessons/04_slides_non_linear_patterns.qmd) (25m)
+- [🔬 Lab: Non-linear patterns](M1/lessons/05_lab_non_linear_patterns.ipynb) (15m)
+
+#### Exercises
+
+- [✍️ Iris Classification](M1/exercises/ex3_class.ipynb) (2hr)
+- [✍️ Modeling Non-linear Patterns](M1/exercises/ex4_non-linear.ipynb) (30m)
+:::
+:::
+<!-- end columns -->
+
+## Module 2: Predictive Modeling Pipelines
+
+Goal: Build a Pipeline to handle preprocessing of both categorical and numerical features.
+
+::: {.columns}
+::: {.column}
+Learning outcomes:
+
+1. Identify causes of missing data
+2. Apply `KNNImputer` to fill missing values; both numerical and categorical
+3. Detect errors where `fit` and `transform` are misused on the wrong set of data
+4. Enumerate the correct order of predictive modeling pipeline steps
+5. Explain the need for *Feature Scaling* in layman terms
+6. Distinguish between linear and non-linear scaling methods
+7. Given a scaled dataset, use `inverse_transform` to show their original values
+8. Distinguish between `OrdinalEncoder` and `OneHotEncoder`
+9. Show why one-hot encoding could be a problem; and explain how to handle
+10. Explain why we split data into train-test splits
+11. List steps to avoid data leakage
+12. Distinguish between `fit`, `predict`, and `transform` methods
+13. Put together pieces of the `Pipeline` using objects like `ColumnTransformer`
+:::
+::: {.column}
+**Materials:**
+
+1. [🔬 Lab: Handle Missing Values](M2/lessons/lab_impute.ipynb) (20m)
+2. [🔬 Lab: Scaling: Numerical Features](M2/lessons/lab_scale.ipynb) (20m)
+3. [🔬 Lab: Encoding: Cateogrical Features](M2/lessons/lab_encode.ipynb) (15m)
+4. [🧬 Slides: Pipelines](M2/lessons/03_slides_pipeline.qmd) (20m)
+5. [🔬 Lab: Pipelines](M2/lessons/04_lab_pipeline.ipynb) (10m)
+
+#### Exercises
+
+1. [✍️ Advertising Revenue](M2/exercises/ex1_multi-reg.ipynb) (1hr)
+2. [✍️ Fuel Efficiency](M2/exercises/ex2_multi-reg.ipynb) (30m)
+
+**Bonus**:
+
+1. [Effect of rescaling on a k-neighbors models](M2/exercises/01_scaling_knn.ipynb) (30m)
+2. [High-cardinality categorical features](M2/exercises/02_high-cardinality.ipynb) (20m)
+:::
+:::
+<!-- end columns -->
+
+## Module 3: Model Selection and Evaluation
+
+### M3-1: Evaluation Metrics
+
+::: {.columns}
+::: {.column}
+
+Learning outcomes:
+
+In this lecture we learn to:
+
+1. Distinguish *loss functions* from *evaluation metrics*
+2. List 3 Regression Metrics and 3 Classification Metrics
+3. Establish a *baseline* for learning
+4. Measure the *scalability* of the model
+5. Explain why more data might not add any information to the model and suggest solution
+6. Detect *over-fitting* and *under-fitting* by estimating *generalization* performance
+7. Understand and use *cross-validation* properly
+8. Explain the utility of the *train/validation/test* splits
+
+:::
+::: {.column}
+**Materials:**
+
+1. [🧬 Slides: Model Evaluation](M3/lessons/01_slides_evaluation.qmd)
+2. [🔬 Lab: Cross-validation](M3/lessons/02_cross-validation.ipynb)
+
+:::
+:::
+<!-- end columns -->
+
+### M3-2: Hyper-parameter Tuning
+
+::: {.columns}
+::: {.column}
+
+Learning outcomes:
+
+1. Given Linear Regression or Decision Tree model, distinguish between it's *parameters* and *hyper-parameters*
+2. Recognize the 5 elements of hyper-parameter search in scikit-learn
+3. Explain the process of hyper-parameter search; describing the role of each of the 5 elements
+4. Explain the difference between Grid Search and either Random Search or Bayesian Search
+5. Recognize the more efficient, model-specific cross-validations
+6. Explain the problem of data dependency and why sample grouping solves it
+
+:::
+::: {.column}
+**Materials:**
+
+- [🔬 Lab: Hyper-parameter Tuning](M3/lessons/03_hyper-parameter_tuning.ipynb)
+
+**Extra:**
+
+- [Text: Controlling Randomness](M3/texts/text_controlling_randomness.qmd)  
+    Distinguish different cases to use `random_state` correctly to control randomness
+
+:::
+:::
+<!-- end columns -->
+
+## Module 4: Regression and Classification Metrics
+
+### M4-1: Regression Metrics
+
+::: {.columns}
+::: {.column}
+Learning outcomes:
+
+1. Explain why regression models need dedicated evaluation metrics.
+2. Interpret and compare *MSE*, ($R^2$), *MAE*, *median AE*, and *MAPE*.
+3. Diagnose regression models visually using *prediction* and *residual plots*.
+4. Explain when a *target transformation* can improve model fit and metrics.
+
+:::
+::: {.column}
+**Materials:**
+
+- [🧬 Slides: Regression Metrics](M4/lessons/01_slides_regression_metrics.qmd)
+- [🔬 Lab: Evaluation of Regression Models](M4/lessons/02_lab_regression_metrics.ipynb)
+
+:::
+:::
+<!-- end columns -->
+
+### M4-2: Classification Metrics
+
+::: {.columns}
+::: {.column}
+Learning outcomes:
+
+1. Distinguish between classification metrics on the basis of $FP$ and $FN$
+2. Given a confusion matrix; tell the performance of a classifier
+3. Given a PR-curve or ROC-curve; be able to tell which classifier is better
+4. Given a set of classifiers; evaluate and select the best one
+:::
+::: {.column}
+**Materials:**
+
+- [🧬 Slides: Classification Metrics](M4/lessons/03_slides_classification_metrics.qmd)
+- [🔬 Lab: Classification Metrics](M4/lessons/04_lab_classification_metrics.ipynb)
+- [Widget: Classifier Threshold](M4/lessons/widget_threshold.qmd)
+:::
+:::
+<!-- end columns -->
+
+
+### M4-3: Classifier Threshold Tuning
+
+::: {.columns}
+::: {.column}
+Learning outcomes:
+
+1. Distinguish cases where one should trade Recall for Precision and vice-versa
+2. Identify the component that affects this trade-off in a fitted classifier (it is the classification threshold)
+3. Given a classifier; tune the decision threshold to maximize either precision or recall
+4. Given a classifier and a specific ratio between $FN$ and $FP$; tune the decision threshold to optimize for that ratio
+5. Understand why probability calibration is important
+:::
+::: {.column}
+**Materials:**
+
+- [🔬 Lab: Classification Threshold Tuning](M4/lessons/06_lab_classifier_threshold_tuning.ipynb)
+- [🔬 Lab: Probability Calibration](M4/lessons/07_lab_probability_calibration.ipynb)
+:::
+:::
+
+## Module 5: Decision Trees and Ensembles
+
+### M5-1: Decision Trees
+
+
+::: {.columns}
+::: {.column}
+Learning outcomes:
+
+1. Explain how decision trees work for regression; two levels deep
+2. Explain how decision trees work for classification; two levels deep
+3. Explain how the maximum depth impacts generalization performance?
+4. Enumerate at least 2 advantages of decision trees
+:::
+::: {.column}
+**Materials:**
+
+- [🧬 Slides: Decision Trees](M5/lessons/01_slides_trees.qmd)
+- [🔬 Lab: Decision Trees](M5/lessons/02_lab_decision_trees.ipynb)
+:::
+:::
+
+### M5-2: Ensemble Methods
+
+
+::: {.columns}
+
+::: {.column}
+
+Learning outcomes:
+
+1. Describe the bagging ensemble method
+2. Describe the boosting ensemble method
+3. Recognize which of the two methods a Random Forest is an instance of
+4. List at least 2 difference between bagging and boosting
+5. Rank the three boosting techniques (Ada Boost, Gradient Boosting, Histogram Gradient Boosting) in terms of accuracy and computational cost
+
+
+:::
+
+::: {.column}
+
+**Materials:**
+
+- [🧬 Slides: Bagging](M5/lessons/03_slides_bagging.qmd)
+- [🧬 Slides: Boosting](M5/lessons/04_slides_boosting.qmd)
+- [🔬 Lab: Ensembles](M5/lessons/05_lab_ensembles.ipynb)
+
+:::
+
+:::
+
+
+## Module 6: Auto Machine Learning
+
+### M6-1: Auto ML with PyCaret
+
+[**PyCaret**](https://pycaret.gitbook.io/docs) is an [open-source](https://github.com/pycaret/pycaret), low-code machine learning library in Python that automates machine learning workflows. It is an end-to-end machine learning and model management tool that speeds up the experiment cycle exponentially and makes you more productive.
+
+In comparison with the other open-source machine learning libraries, PyCaret is an alternate low-code library that can be used to replace hundreds of lines of code with few words only. This makes experiments exponentially fast and efficient. PyCaret is essentially a Python wrapper around several machine learning libraries and frameworks such as [`scikit-learn`](https://scikit-learn.org/stable/), [`XGBoost`](https://xgboost.ai/), [`LightGBM`](https://lightgbm.readthedocs.io/en/stable/), [`CatBoost`](https://catboost.ai/), [`Optuna`](https://optuna.org/), [`Hyperopt`](https://hyperopt.github.io/hyperopt/), [`Ray`](https://www.ray.io/), and many more.
+
+Please watch this 13 minutes video (**PyCaret 2.3.6 NEW Features**) for a walkthrough:
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/Qr6Hu2t2gwY?si=tL_gGtzJ0psQVhKM" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+
+**Bookmark this** [**PyCaret cheat-sheet**](https://pycaret.gitbook.io/docs/learn-pycaret/cheat-sheet).
+
+#### Exercises
+
+- [✍️ Housing Prices Model (PyCaret)](M6/exercises/ex1_pycaret_regression.ipynb)
+- [✍️ Penguins Classification (PyCaret)](M6/exercises/ex2_pycaret_classification.ipynb)
+
+
+### M6-2: Explainable AI
+
+
+::: {.columns}
+
+::: {.column}
+
+Learning outcomes:
+
+1. Show the impact (positive and negative) of features on individual predictions made by the model
+2. Explian the Waterfall Plot as visualized
+3. Rank features by impact
+4. Show features that have infrequently high impact
+5. Interpret a SHAP heatmap
+6. Zoom in on specific features to inspect their impact and support for specific SHAP-values
+
+
+:::
+
+::: {.column}
+
+**Materials:**
+
+- [🔬 Lab: SHAP](M6/lessons/01_lab_shap.ipynb)
+
+:::
+
+:::
+
+
+### M6-3: Data Profiling and Privacy
+
+
+::: {.columns}
+
+::: {.column}
+
+Learning outcomes:
+
+1. Define *data quality profiling* and why it matters
+2. Explain how profiling differs by *data type* (tabular, time-series, text, ...)
+3. Describe how to handle *large datasets* (e.g., sampling)
+4. Use *dataset comparison* to track quality across versions
+5. Understand *data quality alerts* and turn them into next actions
+6. Understand why **Data Privacy** matters
+6. Given a dataset, indentify fields that count as PII directly and indirectly
+7. Given a dataset, apply techniques to protect sensitive data
+
+:::
+
+::: {.column}
+
+
+**Materials**:
+
+1. [🧬 Slides: Data Quality Profiling](M6/lessons/02_slides_data_quality_profiling.qmd)
+2. [🧬 Slides: Sensitive Data](M6/lessons/03_slides_sensitive_data.qmd)
+
+:::
+
+:::
+
+
+## Project
+
+[**🎯 Project Details**](./Project/Project.qmd).
+
+## Resources
+
+Visual IDEs for ML:
+
+- [Orange](https://orangedatamining.com/)  (Open-source)
+- [KNIME](https://www.knime.com/)
+
+## References
+
+- [CS129: Applied ML \| Standford](https://web.stanford.edu/class/cs129/syllabus)
+- [Scikit-learn MOOC](https://inria.github.io/scikit-learn-mooc/)
+- [Hands-on ML \| Aurélien Geron](https://github.com/ageron/handson-ml3)
+- [Interpretable Machine Learning](https://christophm.github.io/)

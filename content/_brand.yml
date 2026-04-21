@@ -1,0 +1,14 @@
+typography:
+  fonts:
+    - family: "Noto Sans"
+      source: google
+    - family: "Noto Sans Arabic"
+      source: google
+    - family: "JetBrains Mono"
+      source: google
+  base:
+    family: "Noto Sans"
+  monospace:
+    family: "JetBrains Mono"
+  link:
+    decoration: none

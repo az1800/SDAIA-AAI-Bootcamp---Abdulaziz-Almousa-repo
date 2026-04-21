@@ -1,0 +1,80 @@
+/*-- scss:defaults --*/
+
+// Core palette (kept as Sass variables for compile-time styling)
+$custom-navy:   #1C355E;
+$custom-orange: #e96852;
+$custom-teal:   #00ae8d;
+
+$custom-purple: #625d9c;
+$custom-cyan:   #00c1de;
+$custom-green:  #6abf4b;
+$custom-yellow: #FFB548;
+$custom-black:  #101820;
+
+$bg:    #ffffff;
+$text:  #101820;
+$muted: #5b6678;
+
+// Reveal / Quarto theme variables
+$body-bg: $bg;
+$body-color: $text;
+
+$presentation-heading-color: $custom-navy;
+$presentation-heading-font: "Noto Sans", "Noto Sans Arabic", "Inter", system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+
+$font-family-sans-serif: "Noto Sans", "Noto Sans Arabic", "Inter", system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+$font-family-monospace: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+// Size + rhythm (tuned for 6-hour bootcamp readability)
+$presentation-font-size-root: 32px;
+$presentation-line-height: 1.25;
+
+// Links
+$link-color: $custom-teal;
+$link-color-hover: $custom-orange;
+
+// Text selection
+$selection-bg: $custom-yellow;
+
+// Code blocks (light)
+$code-block-bg: #f7f9fc;
+$code-block-border-color: #dbe2ea;
+$code-color: $text;
+$code-block-font-size: 0.78em;
+
+// Blockquotes
+$blockquote-border-color: $custom-teal;
+
+// Callouts (Quarto callout blocks)
+$callout-border-width: 0.35rem;
+$callout-color-note: $custom-purple;
+$callout-color-tip: $custom-teal;
+$callout-color-info: $custom-cyan;
+$callout-color-warning: $custom-orange;
+$callout-color-caution: $custom-yellow;
+$callout-color-important: $custom-navy;
+$callout-color-success: $custom-green;
+
+/* Code blocks should always be LTR, even in RTL documents */
+html[dir="rtl"] .reveal pre,
+html[dir="rtl"] .reveal code,
+html[dir="rtl"] .reveal pre code,
+.reveal[dir="rtl"] pre,
+.reveal[dir="rtl"] code,
+.reveal[dir="rtl"] pre code {
+  direction: ltr;
+  text-align: left;
+}
+
+[dir="rtl"] * {
+    text-align: right;
+    direction: rtl;
+}
+
+.center {
+    text-align: center;
+}
+
+.red {
+  color: $custom-orange;
+}

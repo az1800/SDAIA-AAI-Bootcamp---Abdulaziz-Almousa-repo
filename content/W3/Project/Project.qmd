@@ -1,0 +1,36 @@
+---
+title: "Machine Learning Project"
+format: html
+---
+
+First, explore then select a dataset (see: [datasets](./datasets.qmd)).
+
+Follow [Machine Learning Problem Framing](./ML_Problem_Framing.qmd):
+
+1. State the goal
+    - Current/non-ML solution
+    - Application, Goal, Description
+    - ML Task
+2. Clear use case for ML: Difference, Cost, Maintenance, and Expertise requirements.
+3. Does ART apply to the data?
+4. What is the quantity and quality of the data?
+5. What features have been engineered?
+6. Which features have the most predictive power?
+7. What is the prediction of the model, and how is the decision based on it?
+8. What are the model's metrics?
+9. What are the success/failure criteria?
+
+## Deployment
+
+- [create_api](https://pycaret.gitbook.io/docs/get-started/functions/deploy#create_api)  
+    This function takes an input model and creates a POST **API** for inference. It only creates the API and doesn't run it automatically.
+- [create_docker](https://pycaret.gitbook.io/docs/get-started/functions/deploy#create_docker)  
+    This function creates a `Dockerfile` and requirements.txt for deploying API.
+- [create_app](https://pycaret.gitbook.io/docs/get-started/functions/deploy#create_app)  
+    This function creates a basic **gradio app** for inference.
+
+## Deliverable
+
+Git Repo with a `README.md` that includes the above key points.
+
+Include a "Usage" section on how to setup and use the trained model.

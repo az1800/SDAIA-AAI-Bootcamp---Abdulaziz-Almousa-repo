@@ -1,0 +1,13 @@
+[project]
+name = "W1-Python"
+version = "0.1.0"
+description = "Python Programming"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "pyyaml>=6.0.3",
+]

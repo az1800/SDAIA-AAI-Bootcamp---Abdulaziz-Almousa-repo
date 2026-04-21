@@ -1,0 +1,80 @@
+---
+title: "Assessment Solution Key — Lab: Linear Models"
+format: html
+---
+
+## Solution Key
+
+### Part 1: Regression
+
+#### 1. Split feature columns from target columns
+
+```python
+X = df[["flipper_length_mm"]]
+y = df["body_mass_g"]
+```
+
+(Or equivalent with column names; `X` can be a DataFrame or array of shape `(n_samples, n_features)`.)
+
+#### 2. Train a regressor (LinearRegression) model
+
+```python
+from sklearn.linear_model import LinearRegression
+model = LinearRegression()
+model.fit(X, y)
+```
+
+#### 3. Inspect learned parameters
+
+- **Coefficient(s):** `model.coef_`
+- **Intercept:** `model.intercept_`
+
+#### 4. Predict the target for a feature value
+
+Use the **`predict`** method: e.g., `model.predict(X)` or `model.predict(X_new)` for new feature values. It returns a 1D array of predicted target values.
+
+#### 5. Plot the data scatter plot
+
+**Sample answers:** Use **matplotlib** (`plt.scatter(X, y)`) or **seaborn** (e.g., `sns.scatterplot(data=df, x="flipper_length_mm", y="body_mass_g")`). Any reasonable plotting approach is acceptable.
+
+#### 6. Plot the regression line on the same plot
+
+After the scatter plot, compute predictions with `model.predict(X)` (or over a sorted range of feature values for a smooth line) and plot them on the same axes, e.g. `ax.plot(X, model.predict(X))` or plot the line using the same x values as the scatter. The line shows the model’s predicted target for each feature value.
+
+#### 7. Estimate the model error
+
+**Mean Squared Error (MSE)** is common: it is the average of the squared differences between true and predicted target values. **Mean Absolute Error (MAE)** or **R²** are also acceptable; the key idea is measuring how close predictions are to the actual targets.
+
+### Part 2: Classification and train-test split
+
+#### 8. Split data into train and test
+
+```python
+from sklearn.model_selection import train_test_split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+```
+
+(Other `test_size` or `train_size` and `random_state` values are fine.)
+
+#### 9. Justify a held-out test set
+
+We use a held-out test set to estimate **generalization performance** — how well the model will do on **new, unseen data**. Evaluating only on the training data would be optimistic (the model has already seen those points), so a separate test set gives a more honest estimate of real-world performance.
+
+#### 10. Explain `stratify=target`
+
+**`stratify=y`** ensures that the **class proportions** in the dataset are (approximately) preserved in both the training and test splits. So if 30% of the data is class A and 70% class B, both train and test will have similar proportions. This is especially useful for classification when classes are imbalanced, so that the test set remains representative.
+
+#### 11. Train a classifier (LogisticRegression) model
+
+```python
+from sklearn.linear_model import LogisticRegression
+clf = LogisticRegression()
+clf.fit(X_train, y_train)
+```
+
+#### 12. predict vs. predict_proba with DecisionBoundaryDisplay
+
+- **`predict`:** For each point in the grid, it outputs the **predicted class label** (e.g., 0 or 1, or the class name). One discrete label per point. The decision boundary is where the predicted class changes.
+- **`predict_proba`:** For each point, it outputs **probabilities for each class** (e.g., an array of shape `(n_points, n_classes)` that sums to 1 per point). This allows plotting probability contours (e.g., confidence) rather than just the hard decision; the decision boundary is typically where the probability of the positive class equals 0.5.
+
+So: `predict` gives the class; `predict_proba` gives the probability of each class.

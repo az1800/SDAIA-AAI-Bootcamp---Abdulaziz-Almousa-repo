@@ -1,0 +1,240 @@
+---
+title: "Pipelines"
+format: revealjs
+---
+
+The [`Pipeline`](/docs/transformers/v5.5.0/en/main_classes/pipelines#transformers.Pipeline) is a simple but powerful **inference API** that is readily available for a variety of machine learning **tasks** with any **model** from the Hugging Face [Hub](https://hf.co/models). 
+
+## Task-specific Pipeline
+
+The generic `Pipeline` class may be replaced with task-specific one. For example, to get a [TextGenerationPipeline](/docs/transformers/v5.5.0/en/main_classes/pipelines#transformers.TextGenerationPipeline) with [Gemma 2](./model_doc/gemma2), set `task="text-generation"` and `model="google/gemma-2-2b"` as follows:
+
+```py
+from transformers import pipeline
+
+# Instantiate
+pipe = pipeline(task="text-generation", model="google/gemma-2-2b")
+```
+
+Then you can pass input to the `Pipeline` like so:
+
+```python
+# Pass in input text
+pipe("the secret to baking a really good cake is ")
+```
+
+Output:
+
+```text
+[{'generated_text': 'the secret to baking a really good cake is 1. the right ingredients 2. the'}]
+```
+
+## Automatic Speech Recognition (ASR) Pipeline
+
+```py
+# Instantiate
+pipe = pipeline(task="automatic-speech-recognition", model="openai/whisper-large-v3")
+
+# Pass in input audio by URL
+pipe("https://huggingface.co/datasets/Narsil/asr_dummy/resolve/main/mlk.flac")
+```
+
+Output:
+
+```text
+{'text': ' I have a dream that one day this nation will rise up and live out the true meaning of its creed.'}
+```
+
+## Image Classification Pipeline
+
+```py
+# Instantiate
+pipe = pipeline(task="image-classification", model="google/vit-base-patch16-224")
+
+# Pass in input audio by URL
+pipe(images="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/pipeline-cat-chonk.jpeg")
+```
+
+Output:
+
+```text
+[{'label': 'lynx, catamount',
+  'score': 0.43350091576576233},
+ 
+ {'label': 'cougar, puma, catamount, mountain lion, painter, panther, Felis concolor',
+  'score': 0.034796204417943954},
+ 
+ {'label': 'snow leopard, ounce, Panthera uncia',
+  'score': 0.03240183740854263},
+ 
+ {'label': 'Egyptian cat',
+  'score': 0.02394474856555462},
+ 
+ {'label': 'tiger cat',
+  'score': 0.02288915030658245}]
+```
+
+## Visual Question Answering (VQA) Pipeline
+
+```py
+# Instantiate
+pipe = pipeline(task="visual-question-answering", model="Salesforce/blip-vqa-base")
+
+# Pass in input audio by URL
+pipe(
+    image="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/idefics-few-shot.jpg",
+    question="What is in the image?",
+)
+```
+
+Output:
+
+```text
+[{'answer': 'statue of liberty'}]
+```
+
+## Other Tasks
+
+For more tasks examples, see [Transformers, what can they do? | LLM Course](https://huggingface.co/learn/llm-course/chapter1/3).
+
+## Pipeline Parameters
+
+[Pipelines](https://huggingface.co/docs/transformers/main_classes/pipelines#pipelines) can be configured:
+
+1. **Control Outputs**: with task-specific parameters.
+2. **Optimize Processing**: Pipeline supports GPUs, Apple Silicon, and half-precision weights to accelerate inference and save memory.
+
+## `automatic-speech-recognition` Parameters
+
+Example of ASR task parameters:
+
+```python
+pipe_asr = pipeline("automatic-speech-recognition", model="openai/whisper-tiny")
+
+output = pipe_asr(
+    "https://huggingface.co/datasets/Narsil/asr_dummy/resolve/main/mlk.flac",
+    return_timestamps="word", # Returns precise start/end times for every word
+    chunk_length_s=30,        # Splits long audio into 30-second segments for processing
+    stride_length_s=5         # Adds 5 seconds of overlap between segments to prevent cutting words
+)
+```
+
+## Accelerator: `device=0` for GPU
+
+- By default a [Pipeline](/docs/transformers/v5.5.0/en/main_classes/pipelines#transformers.Pipeline) runs on a CPU which is given by `device=-1`
+- For GPU, set `device` to the associated CUDA device id. For example, `device=0` runs on the first GPU.
+
+```py
+pipe = pipeline(
+    task="text-generation", model="google/gemma-2-2b",
+    device=0    # Run on GPU
+)
+```
+
+## Accelerator using `accelerate` library
+
+- [Accelerate](https://hf.co/docs/accelerate/index) is a library of **distributed training**.
+- It loads and stores the model weights on the **fastest device first, and then moves the weights to other devices (CPU, hard drive) as needed**.
+
+Ensure to have [Accelerate](https://hf.co/docs/accelerate/basic_tutorials/install) installed first:
+
+```sh
+pip install -U accelerate
+```
+
+Then you can use it with `device_map="auto"` (or `device="mps"` on Apple silicon):
+
+```py
+pipe = pipeline(
+    task="text-generation", model="google/gemma-2-2b",
+    device_map="auto"    # Use Accelerate 
+)
+```
+
+## Half-precision and Quantization
+
+Half-precision: can be significantly faster and save memory
+
+- add `dtype=torch.float16` (or `torch.bfloat16` for more range, if hardware supports it)
+- performance loss is negligible for most models, especially for larger ones
+
+[**Quantized models**](https://huggingface.co/docs/transformers/quantization/overview) to reduce memory usage even further. Make sure you have the [bitsandbytes](https://hf.co/docs/bitsandbytes/installation) library installed first:
+
+```sh
+pip install -U bitsandbytes
+```
+
+..and then add `quantization_config` to `model_kwargs` in the pipeline.
+
+## Inference for Large Models
+
+Let's put it all together:
+
+```py
+import torch
+from transformers import pipeline, BitsAndBytesConfig
+
+pipe = pipeline(
+    model="google/gemma-7b", # Choosing a relatively small model
+    dtype=torch.bfloat16,    # Half-precision (reduce memory)
+    device_map="auto",       # Automatic Resource Allocation
+    model_kwargs={
+        # 8-bit Quantization (compress model)
+        "quantization_config": BitsAndBytesConfig(load_in_8bit=True)
+    }
+)
+```
+
+## Batch Inference
+
+Batch inference is disabled by default since  hardware, data, and the model itself can affect whether it improves speed or not. In the example below, when there are 4 inputs and `batch_size=2` , Pipeline passes a batch of 2 inputs, **twice**.
+
+```py
+pipe = pipeline(
+    task="text-generation", model="google/gemma-2-2b",
+    batch_size=2 # Batch Inference
+)
+pipe([
+    "the secret to baking a really good cake is",
+    "a baguette is",
+    "paris is the",
+    "hotdogs are"
+])
+```
+Output:
+
+```text
+[[{'generated_text': 'the secret to baking a really good cake is to use a good cake mix.\n\ni’'}],
+ [{'generated_text': 'a baguette is'}],
+ [{'generated_text': 'paris is the most beautiful city in the world.\n\ni’ve been to paris 3'}],
+ [{'generated_text': 'hotdogs are a staple of the american diet. they are a great source of protein and can'}]]
+```
+
+## Batch Inference: rules of thumb
+
+- If you are using CPU, don’t batch.
+- If you are latency constrained (live product doing inference), don’t batch.
+- The larger the GPU the more likely batching is going to be more interesting.
+- Handle OOM errors.
+
+Read more at: [Pipeline batching](https://huggingface.co/docs/transformers/main_classes/pipelines#pipeline-batching).
+
+## `datasets` are lazily loaded
+
+Dataset iterator is smart enough to avoid immediately allocating memory for the entire dataset:
+
+```py
+from transformers.pipelines.pt_utils import KeyDataset
+from transformers import pipeline
+from accelerate import Accelerator
+from datasets import load_dataset
+
+device = Accelerator().device
+
+dataset = datasets.load_dataset("imdb", name="plain_text", split="unsupervised")
+pipeline = pipeline(task="text-classification", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english", device=device)
+
+# This is safe even if the dataset don't fit in memory
+for out in pipeline(KeyDataset(dataset, "text"), batch_size=8, truncation="only_first"):
+    print(out)
+```

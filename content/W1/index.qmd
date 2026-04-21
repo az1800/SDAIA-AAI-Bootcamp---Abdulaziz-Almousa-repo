@@ -1,0 +1,89 @@
+---
+title: "Python Course"
+format: "html"
+---
+
+## Module 1: Setup
+
+Lessons:
+
+1. [Terminal: Shell Basics](./lessons/02_terminal.qmd)
+2. [IDE: VS Code Basics](./lessons/03_vs_code.qmd)
+3. [Version Control: Git and GitHub](./lessons/04_source_control.qmd)
+
+## Module 2: Python Syntax
+
+Lessons:
+
+1. [Scripting](https://halgoz.quarto.pub/pythonia/content/01_instructions.html)
+2. [Control Flow](https://halgoz.quarto.pub/pythonia/content/02_control_flow.html)
+3. [Functions](https://halgoz.quarto.pub/pythonia/content/03_functions.html)
+
+Worked Examples:
+
+1. [Numbers](https://halgoz.quarto.pub/pythonia/exercises/01_numbers/apps.html)
+2. [Control Flow](https://halgoz.quarto.pub/pythonia/exercises/02_control_flow/apps.html)
+
+### Exercises (read instructions below)
+
+- [Chapter 1: Programming as a Way of Thinking](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap01.ipynb)
+- [Chapter 2: Variables and Statements](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap02.ipynb)
+- [Chapter 3: Functions](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap03.ipynb)
+- [Chapter 4: Functions and Interfaces](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap04.ipynb)
+- [Chapter 5: Conditionals and Recursion](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap05.ipynb)
+
+Please follow instructions to act as a proof-of-work:
+
+1. Download the notebook and remove all but the **Exercises** section
+2. Put this file in your repo, under the folder `student/`
+3. Put your name at the top of the file: `"Name: <your name>"`
+3. Do both `git add student/chap01.ipynb` and `git commit -m "C1 Chapter 1: init"` (or via GUI)  
+     Note: the `C1` indicates our current Python Course: Course 1.
+4. Solve the first question
+5. Do a `git add student/chap01.ipynb` again, followed by a `git commit -m "C1 Chapter 1: q1"` (or via GUI)
+6. Repeat for next questions (steps 4 and 5)
+7. Repeat for next exercise notebooks (steps 1 to 6)
+
+Note: this work should be submitted by the end of today 11:59 PM. So, make sure your commits are pushed before that time: `git push` (or via GUI).
+
+## Module 3: Collections
+
+Lessons:
+
+4. [Sequencing](https://halgoz.quarto.pub/pythonia/content/04_sequences.html)
+5. [Computer and the world](https://halgoz.quarto.pub/pythonia/content/05_computer_and_world.html)
+6. [Text files](https://halgoz.quarto.pub/pythonia/content/06_text_files.html)
+7. [Iteration](https://halgoz.quarto.pub/pythonia/content/07_iterators.html)
+
+Worked Examples:
+
+1. [Sequencing](https://halgoz.quarto.pub/pythonia/exercises/03_sequences/apps.html)
+2. [Dictionary](https://halgoz.quarto.pub/pythonia/exercises/04_mapping/apps.html)
+3. [Procedural](https://halgoz.quarto.pub/pythonia/exercises/05_procedural/apps.html)
+
+### Exercises
+
+- [Chapter 7: Iteration and Search](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap07.ipynb)
+- [Chapter 9: Lists](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap09.ipynb)
+- [Chapter 10: Dictionaries](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap10.ipynb)
+
+## Module 4: Programming Paradigms
+
+Lessons:
+
+8. [Object-oriented programming](https://halgoz.quarto.pub/pythonia/content/08_oop.html)
+9. [Functional programming](https://halgoz.quarto.pub/pythonia/content/09_functional.html)
+10. [Error](https://halgoz.quarto.pub/pythonia/content/10_errors.html)
+
+### Exercises
+
+- [Chapter 14: Classes and Functions](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap14.ipynb)
+- [Chapter 15: Classes and Methods](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap15.ipynb)
+- [Chapter 16: Classes and Objects](https://colab.research.google.com/github/AllenDowney/ThinkPython/blob/v3/chapters/chap16.ipynb)
+
+## Final Exercises
+
+1. [List and Dict Access](https://halgoz.quarto.pub/pythonia/exercises/indexing_problems.html)
+2. [Ceasar Cipher](https://halgoz.quarto.pub/pythonia/exercises/ceasar_cipher_problem.html)
+3. [Reading docs: random](https://halgoz.quarto.pub/pythonia/exercises/docs_random_problem.html)
+4. [Requests to APIs](https://halgoz.quarto.pub/pythonia/exercises/requests_ex.html)

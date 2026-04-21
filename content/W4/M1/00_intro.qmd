@@ -1,0 +1,199 @@
+---
+title: "Introduction: What is Agentic AI?"
+format: html
+---
+
+**Artificial Intelligence** is a field of Computer Science, studying how to automate decision making.
+
+**Agentic AI** is where autonomy of the system is at the level of dealing not just with structured tabular data, but with unstructured data such as natural language, speech, visual to inform their decision, in a growingly less supervised manner; and hence, autonomous.
+
+Specifically, today's Agentic AI systems are driven by **Large Language Models (LLMs)**.
+
+## The Evolution of Agents from LLMs
+
+**Large Language Models (LLMs)** are deep neural networks trained to model the most likely token given previous tokens.
+
+First application was: **Translation**. Given an English sentence, the task is to generate the most likely Arabic equivalent. This is done word-by-word, by repeatedly predicting the next Arabic word, the original sentence plus all predicted words thus far.
+
+This technique was able to scale thanks to the **Transformers** architecture which is based on the concept of **Attention**, which learns the influence each previous token has in generating the next token, in the translation.
+
+```
+[
+    ("The meuseum is far to the right", "ال")
+    ("The meuseum is far to the right", "المتحف")
+    ("The meuseum is far to the right", "المتحف في")
+    ("The meuseum is far to the right", "المتحف في أقصى")
+    ("The meuseum is far to the right", "المتحف في أقصى ال")
+    ("The meuseum is far to the right", "المتحف في أقصى اليمين")
+]
+```
+
+Same concept applied more simply in **Paraphrasing**, **Summarization**, and even **Question-Answering**.
+
+Trained on back-and-forth **Chat Conversations**, models were able to mimic chat-like interactions.
+
+A hypothesis was proven at the time that **Multi-task Model** performs better than a single-task model. A more general idea is to train models to **"Follow Instructions"**. In which the user **Prompts** it to do any of the previously mentioned tasks, on-demand. Of course this needed lots of special *Data Curation*.
+
+One task was especially important: **JSON mode**: in which models produced their output in json format, such that it can be parsed easily by programs.
+
+Following that, an especially key development was the task of **Tool Calling**: in which a model is required to select from a set of Python funcition signatures (parameters, types, and docstrings) upon instruction. This is where **Agents** were born.
+
+An **Agent** is based on an LLM in the following sequence:
+
+- program takes input from user
+- program feeds this input + available tools, into the LLM 
+- **LLM generates** text parsable as a tool call
+- program parses the tool call
+- program executes the tool (function)
+- program feeds the output to the LLM
+- **LLM generates** output
+- program prints this output to the user
+
+### Choosing between models
+
+Quality, latency, price, and performance vary between models. Below are some tools to help you select the best one yourself:
+
+- Humans vote for the best model on websites like [Arena.ai](https://arena.ai/) using a blind approach to maintain fairness.
+- You can also compare pricing, providers, and usage tends on [OpenRouter.ai](https://openrouter.ai/models)
+- An automatic short list for models based on your priorities: [Model Recommendation | Artficial Analysis](https://artificialanalysis.ai/models/recommend)
+
+## Applications of Agentic AI
+
+What can Agentic AI do in the real-world?
+
+To answer this question, [we have summarized the five things agentic AI is all about](./case-studies.qmd), by looking at 30+ case studies from companies of various backgrounds using the LangChain ecosystem. Notably:
+
+1. Developer Productivity (high niche)
+2. Domain-Specific Copilots (a simplification of an overly complex system)
+3. Deep Research & Multi-Hop RAG (highly structured intelligence report)
+4. Customer Support & Triage (with a hand-off to human-in-the-loop)
+5. Messy Data Extraction & Browser Automation (reading PDFs and scraping the internet)
+
+## State of Agentic AI
+
+Reading the [State of Agent Engineering 2026](https://www.langchain.com/state-of-agent-engineering), "a survey of 1,300 professionals — from engineers and product managers to business leaders and executives — to uncover the state of AI agents." could give you an idea of what's going on in 2026 with Agentic AI. Notably:
+
+1. It is being used in production by companies of different sizes
+2. Most usage is: "Customer Service" (26.5%), "Research & Data Analysis" (24.4%), and "Internal Productivity" (17.7%).
+3. Biggest blockers being: "Quality of Outputs" (32.9%), "Latency / response time" (20.1%), and "Security and compliance" (16.0%)
+
+## Agent Framework
+
+[LangChain](https://docs.langchain.com/oss/python/langchain/overview) organizes components into these main categories:
+
+| Category                                                             | Purpose                     | Key Components                      | Use Cases                                          |
+| -------------------------------------------------------------------- | --------------------------- | ----------------------------------- | -------------------------------------------------- |
+| **[Models](https://docs.langchain.com/oss/python/langchain/models)**                           | AI reasoning and generation | Chat models, LLMs, Embedding models | Text generation, reasoning, semantic understanding |
+| **[Tools](https://docs.langchain.com/oss/python/langchain/tools)**                             | External capabilities       | APIs, databases, etc.               | Web search, data access, computations              |
+| **[Agents](https://docs.langchain.com/oss/python/langchain/agents)**                           | Orchestration and reasoning | ReAct agents, tool calling agents   | Nondeterministic workflows, decision making        |
+| **[Memory](https://docs.langchain.com/oss/python/langchain/short-term-memory)**                | Context preservation        | Message history, custom state       | Conversations, stateful interactions               |
+| **[Retrievers](https://docs.langchain.com/oss/python/integrations/retrievers)**                | Information access          | Vector retrievers, web retrievers   | RAG, knowledge base search                         |
+| **[Document processing](https://docs.langchain.com/oss/python/integrations/document_loaders)** | Data ingestion              | Loaders, splitters, transformers    | PDF processing, web scraping                       |
+| **[Vector Stores](https://docs.langchain.com/oss/python/integrations/vectorstores)**           | Semantic search             | Chroma, Pinecone, FAISS             | Similarity search, embeddings storage              |
+
+Examples of other frameworks are:
+
+- Vercel’s AI SDK
+- CrewAI
+- OpenAI Agents SDK
+- Google ADK
+- LlamaIndex
+
+## Agent Runtime
+
+Runtimes manage state, and state transitions (orchestration). In other words, building, managing, and deploying long-running, stateful agents. Concretely, things like:
+
+* **Control-flow**: Step by step instructions, conditional execution, and loops.
+* **Persistence**: Thread-level and cross-thread persistence for state management.
+* **Durable execution**: Agents persist through failures and can run for extended periods, resuming from where they left off.
+* **Streaming**: Support for streaming workflows and responses.
+* **Human-in-the-loop**: Incorporate human oversight by inspecting and modifying agent state.
+
+[LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) builds and runs the flowchart..
+
+Below are common flowcharts that makes software systems, agentic:
+
+### RAG (Retrieval-Augmented generation)
+
+```{mermaid}
+graph LR
+    A[User question] --> B[Retriever]
+    B --> C[Relevant docs]
+    C --> D[Chat model]
+    A --> D
+    D --> E[Informed response]
+```
+
+### Agent with tools
+
+```{mermaid}
+graph LR
+    A[User request] --> B[Agent]
+    B --> C{Need tool?}
+    C -->|Yes| D[Call tool]
+    D --> E[Tool result]
+    E --> B
+    C -->|No| F[Final answer]
+```
+
+### Multi-agent system
+
+```{mermaid}
+graph LR
+    A[Complex Task] --> B[Supervisor agent]
+    B --> C[Specialist agent 1]
+    B --> D[Specialist agent 2]
+    C --> E[Results]
+    D --> E
+    E --> B
+    B --> F[Coordinated response]
+```
+
+Other runtimes:
+
+- Temporal
+- Inngest
+
+## Agent Platform
+
+**LangSmith**:
+
+* **Deployment**: from `localhost` to a production server
+* **Observability**: tracing, real-time monitoring, alerting and usage.
+* **Evaluation**: testing versions and providing feedback on traces.
+
+## What about Deep Agents?
+
+Deep Agents is LangChain's relatively new high-level library that makes it easy to get started, but you quickly run into issues where you need more control.
+
+The reason people use frameworks is to control the undeterministic nature of LLMs. Deep Agents doesn't help with that, it only makes the first 5 minutes easy.
+
+## Use Cases
+
+In this course, we develop our skills to be able to tackle these reference Use Cases:
+
+- [Build a **personal assistant** with subagents](https://docs.langchain.com/oss/python/langchain/multi-agent/subagents-personal-assistant)
+- [Build **customer support** with handoffs](https://docs.langchain.com/oss/python/langchain/multi-agent/handoffs-customer-support)
+- [Build a **multi-source knowledge base** with routing](https://docs.langchain.com/oss/python/langchain/multi-agent/router-knowledge-base)
+- [Build a **SQL assistant** with on-demand skills](https://docs.langchain.com/oss/python/langchain/multi-agent/skills-sql-assistant)
+
+### Patterns
+
+Common patterns emerge from these skills; things like:
+
+- [Agentic RAG](https://docs.langchain.com/oss/python/langgraph/agentic-rag)
+
+## Key Takeways
+
+Agents are LLMs. LLMs are undeterministic. Agentic Engineering is about taming its hallucinations and shortcomings to make it actually work like a real piece of software.
+
+To do that we will use:
+
+- LangChain: the framework.
+- LangGraph: the runtime.
+- LangSmith: the platform.
+
+Our main source would be the official LangChain docs:
+
+- [Read More](https://docs.langchain.com/oss/python/concepts/products).
+- [Help: Chat with langchain docs](https://chat.langchain.com/)

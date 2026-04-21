@@ -1,0 +1,363 @@
+---
+title: "Introduction to Machine Learning"
+format:
+  revealjs:
+    incremental: false
+    slide-level: 2
+    include-in-header:
+      - text: |
+          <style>
+          .reveal .red { color: #c0392b; }
+          </style>
+---
+
+## Learning Objectives
+
+In this lecture we learn to:
+
+1. Define *Machine Learning* and understand its utility
+2. Identify the two main tasks in *Supervised ML*
+3. Identify the two parts of a *Data Matrix*
+4. Distinguish *Features* from *Target*
+5. Recognize foundations and related fields
+6. Recognize the three main topics of ML
+
+## Definition
+
+::: {.notes}
+First: how do we define machine learning?
+:::
+
+. . .
+
+> **General:** The study of how automated systems can **extract useful patterns from data** automatically (e.g. Shalev-Shwartz 2014).
+
+. . .
+
+> **Specific**: A program is said to *learn* from experience $E$ with respect to a class of tasks $T$ and performance measure $P$, if its performance on $T$ as measured by $P$ improves with experience $E$. - Tom Mitchel
+
+::: {.notes}
+So learning is: better performance on tasks, as measured by P, as we get more experience E.
+:::
+
+## Data
+
+
+- **Data** — and the **patterns** we extract from it
+- The relationship between **inputs** $X$ and **outputs** $Y$ (supervised)
+- or the **structure** of the data itself (unsupervised)
+
+
+::: {.notes}
+So the subject is data: either predicting Y from X, or discovering structure in the data itself.
+:::
+
+## Example 1: classify based on charactersitics
+
+There are three classic types of Iris Flowers:
+
+![Iris Flowers](../assets/iris_flowers.png)
+
+## The data matrix
+
+X = Physical characteristics, such as their petal and sepal length and width.
+
+y = Iris Type = {versicolor, setosa, virginica}
+
+. . .
+
+We deal with a table of data (figuratively, an Excel sheet):
+
+- Rows are different observations, or **samples**
+- Columns are different descriptors, or **features**
+
+::: {.smaller}
+| Sepal length | Sepal width | Petal length | Petal width | Iris type |
+| ------------ | ----------- | ------------ | ----------- | ---------- |
+| 6cm | 3.4cm | 4.5cm | 1.6cm | versicolor |
+| 5.7cm | 3.8cm | 1.7cm | 0.3cm | setosa |
+| 6.5cm | 3.2cm | 5.1cm | 2cm | virginica |
+| 5cm | 3cm | 1.6cm | 0.2cm | setosa |
+:::
+
+::: {.notes}
+All the data that we will consider will be in what we call a _data
+matrix_. It can be seen as describing our problem in a 2D table:
+
+- the different rows of this table are different observations, for
+  instance different irises. We call these "samples"
+
+- the columns of this table give the different measures or descriptors
+  that we have for these samples. We call them "features".
+:::
+
+## Exampel 2: estimating a number
+
+![](../assets/house_area_vs_price_table.png)
+
+- A data matrix $X$ with $n$ observations.
+- A **target** $y$: a property of each observation.
+
+The goal is to **predict** $y$.
+
+::: {.notes}
+In supervised machine learning, the data that we have are annotated.
+In other words, they are associated with a label or a target class.
+For irises, each data point is associated with a type of iris: our target class.
+The purpose of supervised learning is to predict this target (here the type of iris)
+on new data without annotation (entering only petal and sepal dimensions).
+
+In mathematical terms, for supervised machine learning, we are given
+
+- a data matrix, that we shall denote X, with n observations
+
+- a **target** y, which gives a characteristic for each observation
+
+The goal of supervised learning is to predict y from X.
+:::
+
+## Why use ML?
+
+::: {.notes}
+What is the main benefit of machine learning?
+:::
+
+. . .
+
+**Automating inference**
+
+::: {.notes}
+Humans used to derive rules by hand. Machine learning derives rules from large, complex data.
+:::
+
+. . .
+
+- **Generalization:** systems that make good decisions on **new, unseen** data.
+- Solving problems that are hard to encode with traditional logic (if–else): e.g. faces, speech, translation, motion, interaction with changing environments.
+
+::: {.notes}
+The fruit is automation of inference and the ability to generalize to new situations.
+:::
+
+---
+
+## Merit (Why it matters)
+
+::: {.notes}
+Why is machine learning essential today?
+:::
+
+. . .
+
+Machine learning is a **driving force** of the current technical revolution.
+
+. . .
+
+Two situations where rigid rule-based programming falls short:
+
+::: {.notes}
+We need ML in two kinds of situations.
+:::
+
+. . .
+
+1. **Tasks that resist procedural formulation** — e.g. we cannot fully spell out perception or language as explicit rules, or data is too large for humans to analyze by hand.
+2. **Need for continuous adaptation** — traditional software is fixed; ML lets systems **adapt** their behavior from experience and changing conditions.
+
+::: {.notes}
+So: hard-to-specify tasks and the need for adaptation are where ML shines.
+:::
+
+## Theoretical foundations
+
+![Related fields](../assets/related_fields.png)
+
+
+## Relation to other fields
+
+::: {.notes}
+How does ML relate to other disciplines?
+:::
+
+. . .
+
+- **Artificial Intelligence:** ML is **part of** AI.
+- **Statistics:** Deep overlap.
+  - classical statistics emphasizes **inference** and **hypothesis testing**
+  - ML emphasizes **predictive performance** and **scalability**
+- **Deep Learning:** A **branch** of ML — multi-layer neural networks that learn **hierarchical features** from huge amounts of low-signal raw data automatically.
+
+
+## Theoretical foundations
+
+::: {.notes}
+What are the main disciplines ML builds on?
+:::
+
+. . .
+
+Three main pillars:
+
+::: {.tight}
+1. **Mathematics** — Linear algebra, calculus, optimization
+2. **Statistics and probability**
+3. **Computer science** — Algorithms and data structures
+:::
+
+::: {.notes}
+ML is applied algorithms and data structures, built on maths and statistics.
+:::
+
+
+
+
+## History
+
+::: {.notes}
+ML was not invented by one person; it emerged over decades.
+:::
+
+. . .
+
+- **1950s — Foundations:** Turing Test; philosophical basis for mechanical intelligence.
+- **1956 — Logic:** Dartmouth workshop; **expert systems** based on hand-crafted rules.
+- **1990s — Data:** Shift from hand-written rules to **statistics and machine learning**.
+- **2000s — Scale:** The rise of the internet and big data enabled large-scale learning from massive datasets. Improved algorithms and computational resources (such as GPUs) led to significant progress.
+- **2010s — Deep Learning:** Large open datasets and modern hardware enabled training models with millions of parameters. Breakthroughs in tasks like image and speech recognition, and natural language processing.
+
+
+::: {.notes}
+So: philosophy and Turing, then rule-based AI, then data-driven "classic ML", then rise of big data and scalable algorithms, then deep learning, and now foundation models and AI everywhere.
+:::
+
+
+## Names
+
+::: {.notes}
+What do we call this field?
+:::
+
+. . .
+
+- **Machine Learning (ML)** — most common.
+- **Statistical Learning** — common in academia.
+- **Pattern Recognition** — when the focus is on finding patterns.
+- **Data Mining** — when the focus is on discovering structure in large datasets.
+
+::: {.notes}
+Different names reflect slightly different emphases; the core is the same.
+:::
+
+
+## Topics: The learning signal
+
+::: {.notes}
+The main division of ML is by where the "learning signal" comes from.
+:::
+
+. . .
+
+Three main branches, by **source of the learning signal**:
+
+::: {.tight}
+1. **Supervised learning** — the signal is **given with the data** (labels/targets).
+2. **Unsupervised learning** — the signal **is the data itself** (structure, similarity).
+3. **Reinforcement learning** — the signal is **feedback from the environment** (reward or penalty).
+:::
+
+. . .
+
+![Learning signal](../assets/learning_signal.png){width="75%"}
+
+
+## Supervised learning
+
+::: {.notes}
+In supervised learning we have labeled data: inputs and known outputs.
+:::
+
+. . .
+
+**Labeled data:** the model is trained on inputs with **known outcomes**, and learns a mapping from input to output.
+
+. . .
+
+Examples:
+
+::: {.tight}
+- **Weather:** predict tomorrow’s weather from historical records.
+- **Content moderation:** learn to flag harmful or spam content.
+- **Image classification:** recognize objects, faces, or places in images (e.g. with deep learning).
+:::
+
+. . .
+
+![Supervised](../assets/01_supervised.png){width="45%"}
+
+
+## Unsupervised learning
+
+::: {.notes}
+In unsupervised learning there are no labels; we look for structure in the data.
+:::
+
+. . .
+
+**No explicit labels;** the goal is to find **hidden structure**: similarity, clustering, or simplification.
+
+. . .
+
+Examples:
+
+::: {.tight}
+- **Search engines:** automatic indexing and semantic search.
+- **Marketing:** segment customers by behavior.
+- **Similarity search:** find similar images without predefined categories (e.g. with deep learning).
+:::
+
+. . .
+
+![Unsupervised](../assets/02_unsupervised.png){width="45%"}
+
+
+## Reinforcement learning
+
+::: {.notes}
+In reinforcement learning the signal comes from interacting with an environment.
+:::
+
+. . .
+
+Learning by **interaction with an environment;** the signal is **feedback** (reward or penalty), which reinforces or discourages behavior.
+
+. . .
+
+Examples:
+
+::: {.tight}
+- **Recommendation systems:** user likes/dislikes (environment) improve future recommendations.
+- **Games:** improving play in chess, Go, Dota 2.
+- **Robotics:** arms, vehicles, drones learning from trial and feedback.
+:::
+
+. . .
+
+![Reinforcement](../assets/03_reinforcement.png){width="45%"}
+
+
+## All three together
+
+::: {.notes}
+In practice we often combine supervised, unsupervised, and reinforcement learning, plus rules and software engineering.
+:::
+
+. . .
+
+Real-world systems usually combine:
+
+- Supervised, unsupervised, and reinforcement learning
+- Rule-based logic and software engineering
+
+::: {.notes}
+The benefits we described come from using these branches together, not in isolation.
+:::

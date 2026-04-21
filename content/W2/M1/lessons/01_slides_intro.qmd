@@ -1,0 +1,214 @@
+---
+title: "Introduction to Data Science"
+bibliography: ../../../references.bib
+format:
+  revealjs:
+    incremental: false
+    slide-level: 2
+---
+
+# Motivating story: John Snow and the Broad Street Pump
+
+> Open the comic at: [NotebookLM](https://notebooklm.google.com/notebook/8e9ff4ca-2054-48d5-b0d3-120db7d965f8?artifactId=ce04c28d-cadf-4431-9e82-7d15c8dc4d66) and follow the story.
+
+## John Snow's Story: The invisible threat
+
+- London, 1854 — cholera in Soho; hundreds died within days
+- Consensus: *miasma* (bad air)
+- Data suggested contaminated water is the cause not the air
+
+::: {.notes}
+Open with the comic if you can — it sets the scene quickly. Stress how *crowded* Soho was and how poor sanitation made “bad air” feel plausible, so the miasma story spread easily. Public health policy chased the **smell** (cleaning up decay) while Snow asked a different question: what does the **evidence** actually show? Within days, **hundreds** died — this is not abstract history; it is a crisis where the wrong theory costs lives. Snow did not dismiss domain expertise (physicians cared about disease); he dismissed a consensus that was **not backed by systematic evidence**.
+:::
+
+
+## Gathering the data
+
+Germ theory wasn't established yet. But Snow collected data:
+
+1. **Where** each household lived.
+2. **Which** drinking water they used.
+
+He put deaths on a **map** to see if proximity to certain locations plays a role. Deaths were clustered around the **Broad Street pump**.
+
+![](../../assets/snows-mapped-death-frequency.png){fig-align="center" .r-stretch}
+
+::: {.notes}
+Germ theory was not established; microscopes could not yet nail cholera’s cause. So Snow could not win by arguing *microbiology* — he had to argue from **observation**. Emphasize the legwork: he **walked Soho**, knocked on doors, interviewed families of the dead. That is **structured data collection** before spreadsheets: two fields per household, repeatable and checkable. The map is not decoration; it is how you turn a table into something human perception can **see**. Mention that a list of addresses hides the cluster — the map **reveals** it.
+
+Walk them through the image: deaths are **not** smeared across “the bad part of town.” They hug one infrastructure point — the pump. That is the narrative pivot: if miasma were right, you might expect something broader and wind- or smell-shaped; what you get is **water-shaped**. Keep this slide short; let the map do the talking.
+:::
+
+## Investigating anomalies
+
+**Exceptions** were:
+
+1. The brewery: No deaths. Workers drank from a private well.
+2. The workhouse: No deaths. They drank from their own dug well.
+3. The Hampstead widow: Died far from Soho; it turns out, she drank from the **Broad Street water**.
+4. Her niece, Died. He visited her.
+
+**Conclusion:** in other words, proximity was showed correlation, but source of water was the actual cause.
+
+::: {.notes}
+This is where many stories skip ahead — don’t. Outliers are not annoyances; here they **strengthen** the case. The brewery and workhouse show you can be *surrounded* by death and stay safe if you do not drink that water. The widow is the killer detail: cholera follows the **water**, not the neighborhood. Say clearly: anomalies **tested** the hypothesis and, when explained, became some of the **strongest** evidence. That is how rigorous analysis uses exceptions instead of hiding them.
+:::
+
+## Data to action
+
+Snow showed the board his map and reasoning; they acted on the evidence.
+
+> "I had an interview with the Board of Guardians of St. James's parish... In consequence of what I said, the handle of the pump was removed on the following day." — John Snow
+
+The well was later found **near a leaking cesspit** (حفرة صرف صحي).
+
+::: {.notes}
+Quote lands better if you pause after it — it is a rare moment where analysis becomes a **physical** act in 24 hours. The cesspit detail is the historical “ground truth” that later vindicated Snow: contamination pathway, not moral failing of the poor. Tie it to **intervention**: evidence → decision → action that **stops harm**. That is the arc students should remember.
+:::
+
+
+## Why this matters for data science
+
+John Snow’s workflow is still the template:
+
+1. **Question assumptions** — demand evidence, not consensus alone.
+2. **Collect** structured, verifiable information.
+3. **Visualize** to see patterns lists hide.
+4. **Explain outliers** — they often **test** relationship is causal.
+5. **Act** — turn insight into a **specific** intervention.
+
+**Data science** is using evidence to understand a situation and decide what to do — with modern tools for what Snow did on foot and on paper.
+
+::: {.notes}
+Bridge explicitly to the course: we are not training “people who only write code” or “people who only memorize formulas.” We are training the habit of **evidence, clarity, and action** — gather, visualize, stress-test, then change something. Snow is the **through-line** for the module: when tools get fancy, return to this story so the *purpose* stays clear.
+:::
+
+
+## What is data science?
+
+**Data** (plural): digitally recorded pieces of information about events. Together they support a full picture — stored and processed on computers.
+
+- Numbers, text, images, sound, …
+- Types: numerical, categorical (and subtypes).
+- Different **algorithms** for different goals.
+
+> **Data science** is an interdisciplinary field that uses scientific methods, processes, algorithms, and systems to extract **knowledge and insights** from structured and unstructured data. It combines **statistics**, **computer science**, and **domain knowledge** to analyze data and support decisions and prediction.
+
+::: {.notes}
+There is far more to say about **data** alone (types, quality, bias, scale) — that is why the field has a name. The definition on the slide is the “official” umbrella; your job in lecture is to keep it **grounded**: data science is not a buzzword, it is **disciplined** use of data across three pillars you will name next. If students feel overwhelmed, reassure them: we unpack pieces step by step.
+:::
+
+
+## Three pillars
+
+- **Domain knowledge** — the right questions and interpreting results.
+- **Math & statistics** — sound conclusions from **incomplete** information.
+- **Computer science** — storage, algorithms, scale.
+
+![](../../assets/Data-Science-Venn-Diagram.png){fig-align="center" .r-stretch}
+
+::: {.notes}
+Image source (if asked): ResearchGate figure used widely in teaching — the *idea* matters more than the brand: three circles that **overlap** in practice. No single pillar is enough; weak domain knowledge asks the wrong question, weak stats trusts noise, weak CS cannot ship or scale. Keep the diagram on screen while you speak so they associate the words with the picture.
+:::
+
+## Data science life cycle
+
+![](../../assets/DSLC.png){fig-align="center" .r-stretch}
+
+Standard path from raw data to useful insight or product, and how roles map to the pipeline.
+
+::: {.notes}
+Set expectations: this diagram is a **map**, not a law. Real projects loop back (deployment reveals new cleaning needs, etc.). The point is to see **where** different jobs sit so vocabulary matches industry — especially when students read job posts that mix “analyst,” “scientist,” and “engineer.”
+:::
+
+## The process
+
+1. **Collection** — databases, logs, files, sensors, …
+2. **Cleaning** — missing values, duplicates, formats, errors.
+3. **EDA** — summaries and plots; trends, correlations, anomalies.
+4. **Model building** — learn patterns / predict on new data.
+5. **Deployment** — ship models into apps, APIs, or pipelines that run on **new** data.
+
+::: {.notes}
+Narrate as a **pipeline**: garbage in → garbage out, so cleaning matters; EDA before big models is **cheap insurance**; deployment is where many academic courses stop — in industry, if it is not deployed, it often does not count. Mention that “model” is broad here: from a simple rule to deep learning, the *lifecycle* stage is the same.
+:::
+
+
+## The roles
+
+In large orgs these lines are sharp; in startups one person may wear several hats:
+
+- **Data engineers** — infrastructure: ingestion, storage, pipelines (collection & cleaning).
+- **Data analysts** — clean data, EDA, reports and dashboards (cleaning & EDA).
+- **ML engineers** — reliable, efficient models in production (build & deploy).
+- **Data scientists** — can span the whole cycle; often deepest in EDA and modeling, with enough engineering to get data and ship value.
+
+See: [SDAIA Professional Training in the Fields of Data and AI](https://sdaia.gov.sa/ar/MediaCenter/KnowledgeCenter/ResearchLibrary/ProfessionalTrainingInTheFieldsOfDataAi.pdf).
+
+::: {.notes}
+Contrast **big tech** (narrow roles, handoffs) vs **small teams** (generalists). Data scientists as **generalists** still usually lean hardest on EDA and modeling — but they get stuck if they cannot read a pipeline or talk to engineers about deployment. Analysts answer “what happened?”; many DS/ML roles aim at “what will happen?” or “what should we do?” — overlap is normal; titles are messy.
+:::
+
+## The Data Movie | Data Literacy Explained Visually
+
+{{< video https://www.youtube.com/embed/J2rQTJby8XM width="100%" height="75%"  >}}
+
+## The Non-linear Nature of Data Science
+
+- The view of data science as a multi-stage process can be attributed to Box (@box1976science) and Cox and Snell (@cox1981applied)
+- In reality, DSLC is a non-linear problem-specific path of iterative refinement
+
+![](../../assets/iterative_refinement.png){fig-align="center" .r-stretch}
+
+## The Map is not the Territory
+
+![](../../assets/map_is_not_territory.png){fig-align="center" .r-stretch}
+
+## The Map is not the Territory
+
+As Data Scientists, our work spans the **three realms**:
+
+1. reality
+2. an approximation of reality (the data)
+3. and mental constructs (the analyses/algorithms)
+
+![](../../assets/three_realms.png){fig-align="center" .r-stretch}
+
+> The trustworthiness of our data-driven results depends heavily upon (1) the _current data_ that we are conducting our analysis on and (2) the _future data_ that we are applying our conclusions to being an effective approximation of reality, as well as our analyses and algorithms involving realistic assumptions and capturing relevant patterns. 
+
+## Our World in Data
+
+Want to look at the world through data? See many examples at: [Our World in Data](https://ourworldindata.org/) — research and data on global challenges.
+
+::: {.notes}
+Homework-style nudge: OWID is a **trusted** entry point for global health, environment, and inequality — good for capstones and for calibrating “what good visualization + sourcing looks like.” Encourage them to bookmark it.
+:::
+
+
+## Data Analysis
+
+> **Data analysis** is the process of inspecting, cleansing, transforming, and modeling data with the goal of discovering useful information, informing conclusions, and supporting decision-making.
+
+Two approaches:
+
+:::: {.columns}
+::: {.column}
+1. **Confirmatory Data Analysis (CDA)**  
+   A top-down approach in which we start with a question and use data to answer it.  
+   
+   Example: Hypothesis: "people are addicted to smart phones". Let's see if the data supports this.  
+   
+   [Lab 1: Blind Typing Experiment](./02_lab_cda_blind_typing.ipynb).
+:::
+::: {.column}
+2. **Exploratory Data Analysis (EDA)**  
+   A bottom-up approach in which we start with the data and try to find something interesting.
+
+   Example Data: "people who exercise at the gym". Let's find out what are their: ages, occupations, and common interests are.  
+
+   [Lab 2: Exploring US Census 2010-2019 Data](./03_lab_eda_census.ipynb).
+:::
+::::
+<!-- end columns -->
+
+# The End

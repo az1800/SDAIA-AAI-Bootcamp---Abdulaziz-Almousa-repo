@@ -1,0 +1,373 @@
+---
+title: "Data Quality Profiling"
+format: html
+---
+
+**Data Quality Profiling** is about diagnosing data issues and assessing whether the data can fit its intended use. Whether the next step is either: 
+
+1. Analytics
+2. or Machine Learning
+
+Profiling is done differently depending on the structure of the data: Tabular, Time-series, Text, Images, Audio, ...etc.
+
+### 1. Tabular data
+
+When dealing with tabular data, such as spreadsheets or databases, the profiling provides valuable statistics on data distribution, central tendencies, and categorical variable frequencies. It identifies multivariate relations such as correlations and interactions in a visual manner. It also identifies missing data.
+
+### 2. Time-series data
+
+When dealing with data with temporal dimensions, the profiling extends its capabilities to capture trends, seasonality, cyclic patterns and missing data gaps. It can reveal information about data volatility, periodicity, and anomalies, facilitating a deeper understanding of time-dependent trends.
+
+### 3. Text
+
+When it comes to text data, such as strings or documents, the profiling offers insightful statistics on the distribution of word frequencies, common phrases, and unique words.
+
+## Large Dataset
+
+Dataset size or computational complexity required for profiling and analysis, might necessitate **sampling** a small subset that meets our resource constraints:
+
+```python
+# Sample 5% of the data
+sample = large_dataset.sample(frac=0.05)
+
+# Sample 10,000 rows only
+sample = large_dataset.sample(10_000)
+```
+
+> Several users report this is a good way to scale back the computation time while maintaining representativity.
+
+## Dataset Comparison
+
+**Compare** multiple version of the same dataset. This is useful when:
+
+1. Comparing data from multiple time periods, such two years: Y2025 and Y2026.
+2. To view the dataset profile for training, validation and test sets in machine learning
+3. When performing data transformations, we can iteratively check the impact of the introduced modifications on overall data quality (e.g., comparing data imputation or augmentation results)
+
+## Data Quality Alerts
+
+We look at Data Quality Alerts as implemented by a very popular one-liner library: [ydata.ai](https://docs.profiling.ydata.ai/latest/getting-started/concepts/#data-quality-alerts), to get an idea of how where we need to look for when pre-processing out data.
+
+Notes:
+- Some warnings refer to a specific column, others refer to inter-column relationships and others are dataset-wide
+- Although useful, the decision on whether an alert is in fact a data quality issue always requires domain validation
+
+| **Alert**          | **Description**                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `Constant`         | Column only contains one value                                                                                |
+| `Zeros`            | Column only contains zeros                                                                                    |
+| `High Correlation` | Correlations (either Spearman, Cramer, Pearson, Kendall, 𝜙k) are above the warning threshold (configurable). |
+| `High Cardinality` | Whether the column has more than 50 distinct values. Threshold is configurable.                               |
+| `Imbalance`        | Column is highly imbalanced. Threshold is configurable.                                                       |
+| `Skewness`         | Column's univariate distribution presents skewness. Threshold value is configurable.                          |
+| `Missing Values`   | Column has missing values                                                                                     |
+| `Infinite Values`  | Column has infinite values (either `np.inf` or `-np.inf`)                                                     |
+| `Unique Values`    | All values of the column are unique (count of unique values equals column's length)                           |
+| `Uniform`          | Column follows a uniform distribution (Chi-squared test score > 0.999, threshold score is configurable)       |
+| `Constant length`  | For strings/date/datetimes columns whose entries all have the same length                                     |
+| `Rejected`         | Variable has mixed types or is constant (thus not suitable for meaningful analysis)                           |
+| `Unsupported`      | Column can't be analysed (type is not supported, has mixed types, has `lists`/`dicts`/`tuples`, is            |
+|                    | empty, wrongly formatted)                                                                                     |
+| `Duplicates`       | Dataset-level warning signaling the presence of more than 10 duplicated records.                              |
+| `Empty`            | Dataset-level warning signaling there's no data to be analysed.                                               |
+
+Table Source: [ydata.ai](https://docs.profiling.ydata.ai/latest/getting-started/concepts/#data-quality-alerts).
+
+> [ydata-profiling](https://github.com/Data-Centric-AI-Community/ydata-profiling): 1 Line of code data quality profiling & exploratory data analysis for Pandas and Spark DataFrames.
+
+The following code snippets demonstrate how to detect the specified data quality issues using the Pandas library, often in combination with NumPy and SciPy for statistical analysis.
+
+### 1. `Constant`
+
+**Description:** Column only contains one unique value.
+
+```Python
+# Check if a column 'col' has only one unique value (excluding NaN)
+def is_constant(series):
+    return series.nunique(dropna=True) == 1
+
+# Example usage for all columns
+constant_columns = [col for col in df.columns if is_constant(df[col])]
+```
+
+### 2. `Zeros`
+
+**Description:** Column only contains zeros (for numerical data).
+
+```Python
+# Check if a column 'col' only contains zeros (ignoring NaN)
+def is_all_zeros(series):
+    if pd.api.types.is_numeric_dtype(series):
+        # Check if the sum of absolute non-zero values is 0
+        return (series.fillna(0) != 0).sum() == 0
+    return False
+
+# Example usage for a specific column
+alert_zeros = is_all_zeros(df['numerical_col'])
+```
+
+### 3. `High Correlation`
+
+**Description:** Correlation between two variables is above a warning threshold (e.g., $0.90$). This requires external libraries like SciPy for $\phi_k$ (Phi-K) or specialized categorical correlation measures. We use Pearson correlation as a common example.
+
+```Python
+# Configuration Threshold
+CORRELATION_THRESHOLD = 0.90
+
+# Calculate Pearson correlation matrix
+corr_matrix = df.corr(method='pearson').abs()
+
+# Find pairs with high correlation (excluding self-correlation)
+high_corr_pairs = []
+for i in range(len(corr_matrix.columns)):
+    for j in range(i + 1, len(corr_matrix.columns)):
+        if corr_matrix.iloc[i, j] > CORRELATION_THRESHOLD:
+            col1 = corr_matrix.columns[i]
+            col2 = corr_matrix.columns[j]
+            high_corr_pairs.append((col1, col2, corr_matrix.iloc[i, j]))
+
+# Example output
+# print(high_corr_pairs)
+```
+
+### 4. `High Cardinality`
+
+**Description:** Column has more than 50 distinct values (Threshold is configurable).
+
+```Python
+# Configuration Threshold
+CARDINALITY_THRESHOLD = 50
+
+# Check if a column 'col' has high cardinality
+def is_high_cardinality(series):
+    return series.nunique(dropna=False) > CARDINALITY_THRESHOLD
+
+# Example usage for a specific column
+alert_cardinality = is_high_cardinality(df['categorical_col'])
+```
+
+### 5. `Imbalance`
+
+**Description:** Column is highly imbalanced. This often means the most frequent value accounts for an excessively high proportion (e.g., 95%) of the non-missing data.
+
+```Python
+# Configuration Threshold (e.g., 95% of records belong to the top class)
+IMBALANCE_THRESHOLD = 0.95
+
+# Calculate the proportion of the most frequent value
+def check_imbalance(series):
+    if series.empty:
+        return False
+    # Calculate the proportion of the most common value (excluding NaN)
+    value_counts = series.value_counts(normalize=True, dropna=True)
+    if not value_counts.empty:
+        max_proportion = value_counts.iloc[0]
+        return max_proportion > IMBALANCE_THRESHOLD
+    return False
+
+# Example usage for a specific column
+alert_imbalance = check_imbalance(df['target_variable'])
+```
+
+### 6. `Skewness`
+
+**Description:** Column's univariate distribution presents skewness. Requires `scipy.stats`. A common threshold for significant skewness is $| \text{skewness} | > 1$.
+
+```Python
+import numpy as np
+from scipy.stats import skew
+
+# Configuration Threshold
+SKEWNESS_THRESHOLD = 1.0
+
+# Calculate skewness for a numerical column
+def check_skewness(series):
+    # Ensure numerical data and remove NaN/Inf before calculation
+    if pd.api.types.is_numeric_dtype(series):
+        clean_data = series.replace([np.inf, -np.inf], np.nan).dropna()
+        if len(clean_data) > 2: # Requires at least 3 data points
+            return abs(skew(clean_data)) > SKEWNESS_THRESHOLD
+    return False
+
+# Example usage for a specific column
+alert_skewness = check_skewness(df['amount_column'])
+```
+
+### 7. `Missing Values`
+
+**Description:** Column has missing values (`NaN`, `None`).
+
+```Python
+# Check if a column 'col' contains any missing values
+def has_missing_values(series):
+    return series.isnull().any()
+
+# Example usage for all columns
+missing_cols = [col for col in df.columns if has_missing_values(df[col])]
+```
+
+### 8. `Infinite Values`
+
+**Description:** Column has infinite values (either `np.inf` or `-np.inf`).
+
+```Python
+import numpy as np
+
+# Check if a column 'col' contains any infinite values
+def has_infinite_values(series):
+    if pd.api.types.is_numeric_dtype(series):
+        # Use np.isinf applied to the series
+        return np.isinf(series).any()
+    return False
+
+# Example usage for a specific column
+alert_inf = has_infinite_values(df['float_data'])
+```
+
+### 9. `Unique Values`
+
+**Description:** All values of the column are unique (count of unique values equals column's length).
+
+```Python
+# Check if all values in a column 'col' are unique (like an identifier)
+def is_all_unique(series):
+    return series.is_unique
+
+# Example usage for a specific column
+alert_unique = is_all_unique(df['id_column'])
+```
+
+### 10. `Uniform`
+
+**Description:** Column follows a uniform distribution. This is a statistical test requiring `scipy.stats`. The Chi-squared test can be used to compare the observed distribution (bin counts) against a theoretical uniform distribution.
+
+```Python
+from scipy.stats import chisquare
+import numpy as np
+
+# Configuration Threshold
+UNIFORM_P_VALUE_THRESHOLD = 0.001 # If p-value is above this, we reject the null (not uniform)
+
+# Check for uniform distribution (for categorical or binned numerical data)
+def is_uniform(series, n_bins=10):
+    if len(series.dropna()) < 20: # Needs enough data
+        return False
+
+    # For numerical data, bin it first
+    if pd.api.types.is_numeric_dtype(series):
+        observed_freq, _ = np.histogram(series.dropna(), bins=n_bins)
+    else: # For categorical data
+        observed_freq = series.value_counts().sort_index().values
+
+    # Skip if not enough non-zero bins
+    if np.sum(observed_freq > 0) < 2:
+        return False
+
+    # Expected frequency for a uniform distribution
+    total_obs = observed_freq.sum()
+    expected_freq = np.full_like(observed_freq, total_obs / len(observed_freq))
+
+    # Apply Chi-squared test (requires expected counts > 5 for most cells)
+    # The p-value indicates the probability of observing the data if the null hypothesis (uniform) is true.
+    # A high p-value suggests the data *does not* significantly differ from uniform.
+    chi2_stat, p_value = chisquare(f_obs=observed_freq, f_exp=expected_freq)
+
+    return p_value > UNIFORM_P_VALUE_THRESHOLD
+
+# Example usage for a specific column (Assuming a binned numerical column for this simplified example)
+# alert_uniform = is_uniform(df['binned_data'])
+```
+
+### 11. `Constant length`
+
+**Description:** For strings/date/datetimes columns whose entries all have the same length.
+
+```Python
+# Check if all non-missing values in a column 'col' have the same length
+def has_constant_length(series):
+    # Filter for non-missing string-like data and calculate length
+    lengths = series.astype(str).str.len().dropna().unique()
+    return len(lengths) == 1
+
+# Example usage for a specific column
+alert_const_length = has_constant_length(df['postal_code'])
+```
+
+### 12. `Rejected`
+
+**Description:** Variable has mixed types or is constant (thus not suitable for meaningful analysis). This is a composite alert.
+
+```Python
+# Alert if the column has mixed types or is constant
+def is_rejected(series):
+    # Check for mixed types (requires object dtype and internal check)
+    is_mixed_type = pd.api.types.infer_dtype(series, skipna=True) == 'mixed'
+
+    # Check for constant (using definition from Alert 1)
+    is_constant_val = series.nunique(dropna=True) <= 1
+
+    return is_mixed_type or is_constant_val
+
+# Example usage for a specific column
+alert_rejected = is_rejected(df['data_entry'])
+```
+
+### 13. `Unsupported`
+
+**Description:** Column type is not supported (e.g., lists/dicts/tuples, empty, wrongly formatted). This is often inferred when `pd.api.types.infer_dtype` returns an unanalyzable type.
+
+```Python
+# Alert if the column's inferred type is unsupported (e.g., 'mixed', 'empty', or a complex object type)
+def is_unsupported(series):
+    inferred_type = pd.api.types.infer_dtype(series, skipna=True)
+
+    # Common unsupported types or conditions
+    if inferred_type in ['mixed', 'complex', 'bytes', 'unknown-array']:
+        return True
+    if len(series) == 0:
+        return True
+    if series.empty:
+        return True
+    
+    # Check for complex Python objects (lists, dicts, etc.) that aren't natively handled
+    if series.dtype == 'object':
+        try:
+            # Check if converting to string/number fails or yields inconsistent results
+            # Simple check for complex objects:
+            return any(isinstance(x, (list, dict, set, tuple)) for x in series.dropna().head(10))
+        except Exception:
+            return True
+            
+    return False
+
+# Example usage for a specific column
+alert_unsupported = is_unsupported(df['json_data'])
+```
+
+### 14. `Duplicates`
+
+**Description:** Dataset-level warning signaling the presence of more than 10 duplicated records.
+
+```Python
+# Configuration Threshold
+DUPLICATE_THRESHOLD = 10
+
+# Count the number of duplicated rows (excluding the first occurrence)
+num_duplicates = df.duplicated().sum()
+
+# Trigger alert if the count exceeds the threshold
+alert_duplicates = num_duplicates > DUPLICATE_THRESHOLD
+```
+
+### 15. `Empty`
+
+**Description:** Dataset-level warning signaling there is no data to be analyzed (DataFrame has 0 rows or 0 columns).
+
+```Python
+# Check if the DataFrame is empty (either 0 rows or 0 columns)
+def is_empty_dataframe(df):
+    return df.empty or df.shape[1] == 0
+
+# Example usage
+alert_empty = is_empty_dataframe(df)
+```

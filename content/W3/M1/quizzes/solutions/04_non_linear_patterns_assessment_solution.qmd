@@ -1,0 +1,36 @@
+---
+title: "Assessment Solution Key — Non-linear Patterns"
+format: html
+---
+
+## Solution Key
+
+### 1. Linear vs. non-linear relationships
+
+- **Linear:** The target is a **linear function** of the feature(s), e.g. $y = w_1 x + w_0$. The relationship is a straight line (or hyperplane in higher dimensions); doubling the feature changes the target by a fixed multiple.
+- **Non-linear:** The target depends on the feature(s) in a **non-linear** way, e.g. $y = x^2$, $y = x^3$, or $y = \sin(x)$. The relationship is curved or more complex; a single straight line cannot fit it well.
+
+### 2. Fit non-linear patterns using non-linear models
+
+**Sample answers:** Use a model that is inherently non-linear, such as:
+
+- **Decision trees** (or tree ensembles like Random Forest, Gradient Boosting)
+- **Support Vector Machines** with a **non-linear kernel** (e.g., RBF)
+- **Neural networks**
+- **k-NN regression**
+
+Any one of these is sufficient: the model itself can represent curved or complex boundaries/lines without explicitly engineering polynomial or spline features.
+
+### 3. Fit non-linear patterns with PolynomialFeatures
+
+**Idea:** `PolynomialFeatures` creates **new features** that are powers and products of the original features (e.g., $x$, $x^2$, $x^3$). We fit a **linear** regression on this expanded feature set. The model is still linear in the **parameters**, but the relationship between the **original** feature and the target becomes non-linear (e.g., quadratic or cubic). So we use feature engineering to turn a non-linear relationship in the original space into a linear one in the transformed space.
+
+### 4. Fit non-linear patterns with SplineTransformer
+
+**SplineTransformer** transforms the input feature(s) into a **spline basis** (piecewise polynomial basis functions). The linear model then fits a linear combination of these basis functions, which can approximate smooth non-linear curves. So it allows a linear model to capture non-linear patterns by working in a spline feature space rather than the raw feature space.
+
+### 5. Decision Trees and SVMs as non-linear models
+
+- **(a) Decision Tree:** A Decision Tree is non-linear because it partitions the feature space into **axis-aligned regions** and assigns a constant prediction per region. The boundary between regions is piecewise constant (step-like), not a single straight line or hyperplane, so the overall input–output relationship is non-linear.
+
+- **(b) SVM:** An SVM can be non-linear when using **non-linear kernels** (e.g., RBF or polynomial). The kernel implicitly maps the inputs into a higher-dimensional (or infinite-dimensional) space where a **linear** separating hyperplane in that space corresponds to a **non-linear** boundary in the original feature space. So the decision boundary in the original space can be curved or complex.

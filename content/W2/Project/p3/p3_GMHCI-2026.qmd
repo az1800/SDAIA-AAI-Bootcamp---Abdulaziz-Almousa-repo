@@ -1,0 +1,54 @@
+---
+title: "Project 3: Global Mental Health Crisis Index 2026"
+format: html
+---
+
+92 countries · 29 indicators· Mental health prevalence, systems & crisis scoring
+
+## Scenario
+
+The Global Mental Health Crisis Index 2026 is a cross-national dataset covering 92 countries across all six WHO regions, providing a comprehensive snapshot of the state of mental health worldwide as of 2025. It combines epidemiological, economic, policy, and digital behavior indicators into a single, analysis-ready file with no missing values.
+
+### What's Inside
+
+Each row represents one country and includes 29 variables spanning:
+
+- **Prevalence** — depression rate (%), anxiety rate (%), and estimated comorbidity
+- **Crisis severity** — a composite `mh_crisis_index` score (0–100) and `youth_mh_crisis_score`
+- **Healthcare capacity** — psychiatrists per 100k population, mental health budget as % of  
+    total health spending, per-capita mental health expenditure (USD)
+- **Access & equity** — treatment gap (%), mental health policy/law existence (Yes/No)
+- **Socioeconomic context** — GDP per capita, income group, population size
+- **Digital environment** — average social media hours per day, internet penetration (%),  
+    social media mental health risk category
+- **COVID-19 impact** — estimated % increase in mental health burden post-pandemic
+- **System quality** — an aggregated `mh_system_score` reflecting infrastructure and investment
+
+### Data Sources
+
+Data was compiled and harmonized from:
+
+1. **WHO Mental Health Atlas 2024**
+2. **Global Burden of Disease Study 2023** (IHME)
+3. **Our World in Data** (accessed March 2026)
+4. **OECD Health Statistics 2024**
+5. **DataReportal 2025**
+
+### Potential Use Cases
+
+1. **Visualization & dashboards** — build regional heatmaps, scatter plots, or choropleth maps
+2. **Social media & mental health** — explore the relationship between screen time and depression/anxiety rates
+3. **COVID-19 aftermath** — analyze which regions saw the largest pandemic-era mental health surge
+4. **Policy analysis** — examine the impact of mental health laws and budgets on treatment gaps
+5. **Inequality research** — compare high-income vs. low-income country disparities in care access
+6. **Clustering & segmentation** — group countries by mental health burden, system strength, or income level
+7. **Regression & prediction** — model the crisis index from economic, digital, and policy variables
+
+### Goal
+
+- Showcase 5 of the above potential use cases.
+- Bonus if you showcase 1 of the other two
+
+### Load Dataset
+
+[Dataset Hosted at Kaggle | by Syed Ali Taqi](https://www.kaggle.com/datasets/alitaqishah/global-mental-health-crisis-index-2026), and has been downloaded to `Global_Mental_Health_Crisis_Index_2026.csv`.

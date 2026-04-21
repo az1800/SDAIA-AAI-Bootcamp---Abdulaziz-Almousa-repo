@@ -1,0 +1,42 @@
+---
+title: "Assessment Solution Key — Linear Models"
+format: html
+---
+
+## Solution Key
+
+### 1. Code for modeling the relationship between two variables
+
+For a **numerical** (continuous) target we use **LinearRegression**:
+
+```python
+from sklearn.linear_model import LinearRegression
+model = LinearRegression()
+```
+
+(Optional: `model.fit(X, y)` to train.)
+
+### 2. Map target data type to model type
+
+- (a) **Spam or not** → categorical (binary) → **LogisticRegression**
+- (b) **Selling price (dollars)** → numerical/continuous → **LinearRegression**
+
+### 3. Given a target variable, identify which model to use
+
+Use **logistic regression**, because the target is **categorical** (loan approved: Yes/No). Logistic regression is for classification; linear regression is for continuous targets.
+
+### 4. Identify dependent and independent variable on a 2D plot
+
+- **Independent variable (feature):** usually on the **x-axis** — we use it to explain or predict.
+- **Dependent variable (target):** usually on the **y-axis** — it is the quantity we are trying to predict.
+
+So the dependent variable is typically on the vertical axis and the independent on the horizontal axis.
+
+### 5. Regression line vs. decision boundary
+
+- **Regression line:** In linear regression, it is the line (or hyperplane) that predicts the **continuous target value**. Points are spread around it; the line shows the predicted value as a function of the features.
+- **Decision boundary:** In logistic regression (and other classifiers), it is the line (or surface) that **separates classes**. On one side the model predicts one class, on the other side the other class; it does not predict a continuous number.
+
+### 6. When linear models don't fit well
+
+- **Linear separability:** The classes can be separated by a **single straight line** (in 2D) or a hyperplane (in higher dimensions). If the data is **not** linearly separable (e.g., one class is surrounded by the other, or the boundary is curved), a linear model like logistic regression will not fit the data well and may have high error or poor decision boundaries.
