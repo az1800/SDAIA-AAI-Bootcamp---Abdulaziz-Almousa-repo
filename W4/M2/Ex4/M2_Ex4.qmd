@@ -1,0 +1,56 @@
+---
+title: "M2.Ex4: Automatic Speech Recognition (ASR)"
+format: html
+jupyter: python3
+---
+
+## Task 1: YouTube
+
+### Use case: Vision 2030 Project Briefing Generator
+
+A Riyadh-based analyst tracks Vision 2030 announcements (LEAP, NEOM, PIF, Misk, SDAIA) on YouTube. Some clips have captions, many panel sessions and Arabic-only press briefings do not. This pipeline ingests a list of YouTube URLs and produces a structured briefing for each, with a transcript-first / ASR-fallback strategy.
+
+Pipeline stages:
+
+1. Pull metadata via `yt-dlp` (the `YoutubeLoaderDL` integration).
+2. Try YouTube captions via `youtube-transcript-api` (the YouTube transcripts integration).
+3. If captions are absent, disabled, or unusable, download audio with `yt-dlp` (the YouTube audio integration) and run Docling's ASR pipeline on it.
+4. Wrap the result as a LangChain `Document` with rich metadata.
+5. Score Vision-2030 keywords and emit a markdown briefing.
+
+The non-trivial part is the fallback: the same downstream extraction code runs regardless of how the text was obtained.
+
+### Setup
+
+```{python}
+#| eval: false
+# Run once
+# pip install yt-dlp youtube-transcript-api langchain langchain-community docling openai-whisper
+# System dependency: ffmpeg (apt install ffmpeg)
+```
+
+### Pipeline
+
+```{python}
+#| eval: false
+from youtube_briefing import process_video, render_briefing
+
+urls = [
+    "https://www.youtube.com/watch?v=VIDEO_WITH_CAPTIONS",
+    "https://www.youtube.com/watch?v=VIDEO_WITHOUT_CAPTIONS",
+]
+
+briefs = [process_video(u) for u in urls]
+print(render_briefing(briefs))
+```
+
+### Why this is non-trivial
+
+- Mixed-source ingestion. Captions and ASR produce structurally different text. The pipeline normalizes both into a single `VideoBrief` schema.
+- Language preference logic. Captions can exist in `en`, `ar`, or auto-generated forms. The fetcher prefers manual over auto, and English/Arabic over others.
+- Graceful degradation. Three failure modes are handled independently: no captions, captions disabled, or video unavailable.
+- LangChain compatibility. Output is a `Document` object, so the briefs can flow into any LangChain retriever, vector store, or summarization chain.
+
+### Provenance in the output
+
+Every brief carries a `transcript_source` field (`youtube_captions` or `docling_asr`) so the analyst can audit how the text was produced. This matters for compliance: ASR transcripts have different error profiles than captions and should be treated with appropriate confidence.
