@@ -1,0 +1,4 @@
+rag-env/
+**/rag-env/
+.venv/
+**/.venv/
