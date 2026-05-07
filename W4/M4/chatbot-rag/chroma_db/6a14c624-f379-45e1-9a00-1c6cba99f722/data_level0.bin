@@ -1,0 +1,7943 @@
+func}"
+                )
+
+            super().__init__(
+                wrapped,
+                cast(
+                    Optional[Callable[[Input], Awaitable[Output]]],
+                    awrapped,
+                ),
+            )
+
+        @staticmethod
+        def _wrap_sync(
+            func: Callable[..., Output],
+        ) -> Callable[[Input, RunnableConfig], Output]:
+            """Wrap a synchronous function to make it asynchronous."""
+
+            def wrap_traceable(inputs: dict, config: RunnableConfig) -> Any:
+                run_tree = run_trees.RunTree.from_runnable_config(cast(dict, config))
+                return func(**inputs, langsmith_extra={"run_tree": run_tree})
+
+            return cast(Callable[[Input, RunnableConfig], Output], wrap_traceable)
+
+        @staticmethod
+        def _wrap_async(
+            afunc: Optional[Callable[..., Awaitable[Output]]],
+        ) -> Optional[Callable[[Input, RunnableConfig], Awaitable[Output]]]:
+            """Wrap an async function to make it synchronous."""
+            if afunc is None:
+                return None
+
+            if not is_traceable_function(afunc):
+                raise ValueError(
+                    "RunnableTraceable expects a function wrapped by the LangSmith"
+                    f" @traceable decorator. Got {afunc}"
+                )
+            afunc_ = cast(Callable[..., Awaitable[Output]], afunc)
+
+            async def awrap_traceable(inputs: dict, config: RunnableConfig) -> Any:
+                run_tree = run_trees.RunTree.from_runnable_config(cast(dict, config))
+                return await afunc_(**inputs, langsmith_extra={"run_tree": run_tree})
+
+            return cast(
+                Callable[[Input, RunnableConfig], Awaitable[Output]], awrap_traceable
+            )
+
+    return RunnableTraceable(traceable_fn)
+
+
+## Private Methods and Objects
+_VALID_RUN_TYPES = {
+    "tool",
+    "chain",
+    "llm",
+    "retriever",
+    "embedding",
+    "prompt",
+    "parser",
+}
+
+
+class _TraceableContainer(TypedDict, total=False):
+    """Typed response when initializing a run a traceable."""
+
+    new_run: Optional[run_trees.RunTree]
+    project_name: Optional[str]
+    outer_project: Optional[str]
+    outer_metadata: Optional[dict[str, Any]]
+    outer_tags: Optional[list[str]]
+    _on_success: Optional[Callable[[run_trees.RunTree], Any]]
+    on_end: Optional[Callable[[run_trees.RunTree], Any]]
+    context: contextvars.Context
+    _token_event_logged: Optional[bool]
+    enabled: Optional[bool]
+    exceptions_to_handle: Optional[tuple[type[BaseException], ...]]
+
+
+class _ContainerInput(TypedDict, total=False):
+    """Typed response when initializing a run a traceable."""
+
+    extra_outer: Optional[dict]
+    name: Optional[str]
+    metadata: Optional[dict[str, Any]]
+    tags: Optional[list[str]]
+    client: Optional[ls_client.Client]
+    reduce_fn: Optional[Callable]
+    project_name: Optional[str]
+    run_type: ls_client.RUN_TYPE_T
+    process_inputs: Optional[Callable[[dict], dict]]
+    process_chunk: Optional[Callable]
+    invocation_params_fn: Optional[Callable[[dict], dict]]
+    dangerously_allow_filesystem: Optional[bool]
+    enabled: Optional[bool]
+    exceptions_to_handle: Optional[tuple[type[BaseException], ...]]
+
+
+def _format_error_with_exceptions_to_handle(
+    error: BaseException | None,
+    exceptions_to_handle: Optional[tuple[type[BaseException], ...]],
+) -> Optional[str]:
+    """Format error for logging, suppressing traceback for handled exceptions."""
+    if exceptions_to_handle and isinstance(error, exceptions_to_handle):
+        return None
+
+    stacktrace = utils._format_exc()
+    return f"{repr(error)}\n\n{stacktrace}"
+
+
+def _container_end(
+    container: _TraceableContainer,
+    outputs: Optional[Any] = None,
+    error: Optional[BaseException] = None,
+) -> None:
+    """End the run."""
+    run_tree = container.get("new_run")
+    if run_tree is None:
+        # Tracing not enabled
+        return
+    if isinstance(outputs, dict):
+        dict_outputs = outputs
+    elif (
+        outputs is not None
+        and hasattr(outputs, "model_dump")
+        and callable(outputs.model_dump)
+        and not isinstance(outputs, type)
+    ):
+        try:
+            dict_outputs = outputs.model_dump(exclude_none=True, mode="json")
+        except Exception as e:
+            LOGGER.debug(
+                f"Failed to use model_dump to serialize {type(outputs)} to JSON: {e}"
+            )
+            dict_outputs = {"output": outputs}
+    else:
+        dict_outputs = {"output": outputs}
+    if (usage := _extract_usage(run_tree=run_tree, outputs=dict_outputs)) is not None:
+        run_tree.metadata["usage_metadata"] = usage
+    if error:
+        error_repr = _format_error_with_exceptions_to_handle(
+            error, container.get("exceptions_to_handle")
+        )
+    else:
+        error_repr = None
+        if (_on_success := container.get("_on_success")) and callable(_on_success):
+            try:
+                _on_success(run_tree)
+            except BaseException as e:
+                warnings.warn(f"Failed to run _on_success function: {e}")
+
+    run_tree.end(outputs=dict_outputs, error=error_repr)
+    # Patch run if enabled=True (force) or if tracing is enabled globally
+    enabled = container.get("enabled")
+    if enabled is True or utils.tracing_is_enabled() is True:
+        run_tree.patch()
+    if (on_end := container.get("on_end")) and callable(on_end):
+        try:
+            on_end(run_tree)
+        except BaseException as e:
+            warnings.warn(f"Failed to run on_end function: {e}")
+
+
+def _collect_extra(extra_outer: dict, langsmith_extra: LangSmithExtra) -> dict:
+    run_extra = langsmith_extra.get("run_extra", None)
+    if run_extra:
+        extra_inner = {**extra_outer, **run_extra}
+    else:
+        extra_inner = extra_outer
+    return extra_inner
+
+
+def _get_parent_run(
+    langsmith_extra: LangSmithExtra,
+    config: Optional[dict] = None,
+) -> Optional[run_trees.RunTree]:
+    parent = langsmith_extra.get("parent")
+    if parent == "ignore":
+        return None
+    if isinstance(parent, run_trees.RunTree):
+        return parent
+    if isinstance(parent, Mapping):
+        return run_trees.RunTree.from_headers(
+            parent,
+            client=langsmith_extra.get("client"),
+            # Precedence: headers -> cvar -> explicit -> env var
+            project_name=_get_project_name(langsmith_extra.get("project_name")),
+        )
+    if isinstance(parent, str):
+        dort = run_trees.RunTree.from_dotted_order(
+            parent,
+            client=langsmith_extra.get("client"),
+            # Precedence: cvar -> explicit ->  env var
+            project_name=_get_project_name(langsmith_extra.get("project_name")),
+        )
+        return dort
+    run_tree = langsmith_extra.get("run_tree")
+    if run_tree:
+        return run_tree
+    crt = get_current_run_tree()
+    if _runtime_env.get_langchain_core_version() is not None:
+        if rt := run_trees.RunTree.from_runnable_config(
+            config, client=langsmith_extra.get("client")
+        ):
+            # Still need to break ties when alternating between traceable and
+            # LanChain code.
+            # Nesting: LC -> LS -> LS, we want to still use LS as the parent
+            # Otherwise would look like LC -> {LS, LS} (siblings)
+            if (
+                not crt  # Simple LC -> LS
+                # Let user override if manually passed in or invoked in a
+                # RunnableSequence. This is a naive check.
+                or (config is not None and config.get("callbacks"))
+                # If the LangChain dotted order is more nested than the LangSmith
+                # dotted order, use the LangChain run as the parent.
+                # Note that this condition shouldn't be triggered in later
+                # versions of core, since we also update the run_tree context
+                # vars when updating the RunnableConfig context var.
+                or rt.dotted_order > crt.dotted_order
+            ):
+                return rt
+    return crt
+
+
+def _setup_run(
+    func: Callable,
+    container_input: _ContainerInput,
+    langsmith_extra: Optional[LangSmithExtra] = None,
+    args: Any = None,
+    kwargs: Any = None,
+) -> _TraceableContainer:
+    """Create a new run or create_child() if run is passed in kwargs."""
+    extra_outer = container_input.get("extra_outer") or {}
+    metadata = container_input.get("metadata")
+    tags = container_input.get("tags")
+    client = container_input.get("client")
+    run_type = container_input.get("run_type") or "chain"
+    dangerously_allow_filesystem = container_input.get(
+        "dangerously_allow_filesystem", False
+    )
+    outer_project = _context._PROJECT_NAME.get()
+    langsmith_extra = langsmith_extra or LangSmithExtra()
+    name = langsmith_extra.get("name") or container_input.get("name")
+    client_ = langsmith_extra.get("client", client) or _context._CLIENT.get()
+    parent_run_ = _get_parent_run(
+        {**langsmith_extra, "client": client_}, kwargs.get("config")
+    )
+    project_cv = _context._PROJECT_NAME.get()
+    selected_project = (
+        project_cv  # From parent trace
+        or (
+            parent_run_.session_name if parent_run_ else None
+        )  # from parent run attempt 2 (not managed by traceable)
+        or langsmith_extra.get("project_name")  # at invocation time
+        or container_input["project_name"]  # at decorator time
+        or _context._GLOBAL_PROJECT_NAME  # global fallback from ls.configure
+        or utils.get_tracer_project()  # default
+    )
+    reference_example_id = langsmith_extra.get("reference_example_id")
+    id_ = langsmith_extra.get("run_id")
+    enabled = container_input.get("enabled")
+    # Determine if tracing should be enabled for this function:
+    # - enabled=False: never trace
+    # - enabled=True: always trace
+    # - enabled=None: use context/environment setting
+    if enabled is False or (
+        enabled is not True and not (parent_run_ or utils.tracing_is_enabled())
+    ):
+        utils.log_once(
+            logging.DEBUG,
+            "LangSmith tracing is not enabled, returning original function.",
+        )
+        context = copy_context()
+        # Clear the parent RunTree context so nested calls don't inherit it
+        context.run(_context._PARENT_RUN_TREE_REF.set, None)
+        return _TraceableContainer(
+            new_run=None,
+            project_name=selected_project,
+            outer_project=outer_project,
+            outer_metadata=None,
+            outer_tags=None,
+            _on_success=langsmith_extra.get("_on_success"),
+            on_end=langsmith_extra.get("on_end"),
+            context=context,
+            _token_event_logged=False,
+            exceptions_to_handle=container_input.get("exceptions_to_handle"),
+        )
+    signature = inspect.signature(func)
+    name_ = name or utils._get_function_name(func)
+    extra_inner = _collect_extra(extra_outer, langsmith_extra)
+    outer_metadata = _context._METADATA.get() or _context._GLOBAL_METADATA
+    outer_tags = _context._TAGS.get() or _context._GLOBAL_TAGS
+    context = copy_context()
+    metadata_ = {
+        **(langsmith_extra.get("metadata") or {}),
+        **(outer_metadata or {}),
+    }
+    context.run(_context._METADATA.set, metadata_)
+    metadata_.update(metadata or {})
+    metadata_["ls_method"] = "traceable"
+    extra_inner["metadata"] = metadata_
+    inputs, attachments = _get_inputs_and_attachments_safe(
+        signature, *args, func=func, **kwargs
+    )
+    invocation_params_fn = container_input.get("invocation_params_fn")
+    if invocation_params_fn:
+        try:
+            invocation_params = {
+                k: v for k, v in invocation_params_fn(inputs).items() if v is not None
+            }
+            if invocation_params and isinstance(invocation_params, dict):
+                metadata_.update(invocation_params)
+        except BaseException as e:
+            LOGGER.error(f"Failed to infer invocation params for {name_}: {e}")
+    process_inputs = container_input.get("process_inputs")
+    if process_inputs:
+        try:
+            inputs = process_inputs(inputs)
+        except BaseException as e:
+            LOGGER.error(f"Failed to filter inputs for {name_}: {e}")
+    tags_ = (langsmith_extra.get("tags") or []) + (outer_tags or [])
+    context.run(_context._TAGS.set, tags_)
+    tags_ += tags or []
+    if parent_run_ is not None:
+        new_run = parent_run_.create_child(
+            name=name_,
+            run_type=run_type,
+            inputs=inputs,
+            tags=tags_,
+            extra=extra_inner,
+            run_id=id_,
+            attachments=attachments,
+        )
+    else:
+        # Create RunTree kwargs conditionally to let RunTree generate id from start_time
+        run_tree_kwargs = {
+            "name": name_,
+            "inputs": inputs,
+            "run_type": run_type,
+            "reference_example_id": ls_client._ensure_uuid(
+                reference_example_id, accept_null=True
+            ),
+            "project_name": selected_project,
+            "replicas": run_trees._REPLICAS.get(),
+            "extra": extra_inner,
+            "tags": tags_,
+            "client": client_,
+            "attachments": attachments,
+            "dangerously_allow_filesystem": dangerously_allow_filesystem,
+        }
+        # Only pass id if user explicitly provided one
+        if id_ is not None:
+            run_tree_kwargs["id"] = ls_client._ensure_uuid(id_)
+        new_run = run_trees.RunTree(**cast(Any, run_tree_kwargs))
+    # Post run if enabled=True (force) or if tracing is enabled globally
+    if enabled is True or utils.tracing_is_enabled() is True:
+        try:
+            new_run.post()
+        except BaseException as e:
+            LOGGER.error(f"Failed to post run {new_run.id}: {e}")
+    response_container = _TraceableContainer(
+        new_run=new_run,
+        project_name=selected_project,
+        outer_project=outer_project,
+        outer_metadata=outer_metadata,
+        outer_tags=outer_tags,
+        on_end=langsmith_extra.get("on_end"),
+        _on_success=langsmith_extra.get("_on_success"),
+        context=context,
+        _token_event_logged=False,
+        enabled=enabled,
+        exceptions_to_handle=container_input.get("exceptions_to_handle"),
+    )
+    context.run(_context._PROJECT_NAME.set, response_container["project_name"])
+    # Store a weak reference (not the RunTree itself) in the copied context.
+    # This prevents memory leaks when contexts are captured by asyncio operations
+    # (call_later, create_task, etc.) â€” the captured context holds only a weakref,
+    # and the RunTree can be GC'd once no strong references remain.
+    if new_run is not None:
+        context.run(_context._PARENT_RUN_TREE_REF.set, weakref.ref(new_run))
+    else:
+        context.run(_context._PARENT_RUN_TREE_REF.set, None)
+    return response_container
+
+
+def _handle_container_end(
+    container: _TraceableContainer,
+    outputs: Optional[Any] = None,
+    error: Optional[BaseException] = None,
+    outputs_processor: Optional[Callable[..., dict]] = None,
+) -> None:
+    """Handle the end of run."""
+    try:
+        if outputs_processor is not None:
+            outputs = outputs_processor(outputs)
+        _container_end(container, outputs=outputs, error=error)
+    except BaseException as e:
+        LOGGER.warning(f"Unable to process trace outputs: {repr(e)}")
+
+
+def _is_traceable_function(func: Any) -> bool:
+    return getattr(func, "__langsmith_traceable__", False)
+
+
+def _get_inputs(
+    signature: inspect.Signature, *args: Any, **kwargs: Any
+) -> dict[str, Any]:
+    """Return a dictionary of inputs from the function signature."""
+    bound = signature.bind_partial(*args, **kwargs)
+    bound.apply_defaults()
+    arguments = dict(bound.arguments)
+    arguments.pop("self", None)
+    arguments.pop("cls", None)
+    for param_name, param in signature.parameters.items():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            # Update with the **kwargs, and remove the original entry
+            # This is to help flatten out keyword arguments
+            if param_name in arguments:
+                arguments.update(arguments[param_name])
+                arguments.pop(param_name)
+
+    return arguments
+
+
+def _get_inputs_safe(
+    signature: inspect.Signature, *args: Any, **kwargs: Any
+) -> dict[str, Any]:
+    try:
+        return _get_inputs(signature, *args, **kwargs)
+    except BaseException as e:
+        LOGGER.debug(f"Failed to get inputs for {signature}: {e}")
+        return {"args": args, "kwargs": kwargs}
+
+
+def _is_attachment(param: inspect.Parameter, func: Optional[Callable] = None) -> bool:
+    if param.annotation == schemas.Attachment or (
+        get_origin(param.annotation) == Annotated
+        and any(arg == schemas.Attachment for arg in get_args(param.annotation))
+    ):
+        return True
+
+    # try resolving stringified annotations
+    if func is not None and isinstance(param.annotation, str):
+        try:
+            # include_extras=True preserves annotated metadata
+            type_hints = get_type_hints(func, include_extras=True)
+            resolved_annotation = type_hints.get(param.name)
+            if resolved_annotation is not None:
+                return resolved_annotation == schemas.Attachment or (
+                    get_origin(resolved_annotation) == Annotated
+                    and any(
+                        arg == schemas.Attachment
+                        for arg in get_args(resolved_annotation)
+                    )
+                )
+        except (NameError, TypeError, AttributeError):
+            pass
+
+    return False
+
+
+def _attachment_args_helper(
+    signature: inspect.Signature, func: Optional[Callable] = None
+) -> set[str]:
+    return {
+        name
+        for name, param in signature.parameters.items()
+        if _is_attachment(param, func)
+    }
+
+
+@functools.lru_cache(maxsize=1000)
+def _cached_attachment_args_by_signature(signature: inspect.Signature) -> set[str]:
+    return _attachment_args_helper(signature, None)
+
+
+_attachment_args_cache: weakref.WeakKeyDictionary[
+    Callable[..., Any], tuple[inspect.Signature, set[str]]
+] = weakref.WeakKeyDictionary()
+_attachment_args_cache_lock = threading.Lock()
+
+
+def _cached_attachment_args(
+    signature: inspect.Signature, func: Optional[Callable] = None
+) -> set[str]:
+    if func is None:
+        return _cached_attachment_args_by_signature(signature)
+
+    try:
+        with _attachment_args_cache_lock:
+            cached = _attachment_args_cache.get(func)
+    except TypeError:
+        # Some callable objects cannot be weak-referenced.
+        return _attachment_args_helper(signature, func)
+
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    result = _attachment_args_helper(signature, func)
+    with _attachment_args_cache_lock:
+        _attachment_args_cache[func] = (signature, result)
+    return result
+
+
+def _clear_cached_attachment_args() -> None:
+    with _attachment_args_cache_lock:
+        _attachment_args_cache.clear()
+    _cached_attachment_args_by_signature.cache_clear()
+
+
+_cached_attachment_args.cache_clear = _clear_cached_attachment_args  # type: ignore[attr-defined]
+
+
+def _attachment_args(
+    signature: inspect.Signature, func: Optional[Callable] = None
+) -> set[str]:
+    # Caching signatures fails if there's unhashable default values.
+    try:
+        return _cached_attachment_args(signature, func)
+    except TypeError:
+        return _attachment_args_helper(signature, func)
+
+
+def _get_inputs_and_attachments_safe(
+    signature: inspect.Signature,
+    *args: Any,
+    func: Optional[Callable] = None,
+    **kwargs: Any,
+) -> tuple[dict, schemas.Attachments]:
+    try:
+        inferred = _get_inputs(signature, *args, **kwargs)
+        attachment_args = _attachment_args(signature, func)
+        if attachment_args:
+            inputs, attachments = {}, {}
+            for k, v in inferred.items():
+                if k in attachment_args:
+                    attachments[k] = v
+                else:
+                    inputs[k] = v
+            return inputs, attachments
+        return inferred, {}
+    except BaseException as e:
+        LOGGER.warning(f"Failed to get inputs for {signature}: {e}")
+        return {"args": args, "kwargs": kwargs}, {}
+
+
+def _set_tracing_context(context: Optional[dict[str, Any]] = None):
+    """Set the tracing context."""
+    if context is None:
+        for k, v in _CONTEXT_KEYS.items():
+            v.set(None)
+        return
+    for k, v in context.items():
+        if k == "parent":
+            # "parent" is a RunTree â€” store a weak reference
+            if v is not None:
+                _context._PARENT_RUN_TREE_REF.set(weakref.ref(v))
+            else:
+                _context._PARENT_RUN_TREE_REF.set(None)
+            continue
+        var = _CONTEXT_KEYS.get(k)
+        if var is not None:
+            var.set(v)
+
+
+def _process_iterator(
+    generator: Iterator[T],
+    run_container: _TraceableContainer,
+    is_llm_run: bool,
+    # Results is mutated
+    results: list[Any],
+    process_chunk: Optional[Callable],
+    otel_context_manager: Optional[Any] = None,
+) -> Generator[T, None, Any]:
+    try:
+        while True:
+            if otel_context_manager:
+                # Create a fresh context manager for each iteration
+                def next_with_otel_context():
+                    # Get the run_tree from run_container to create a fresh context
+                    run_tree = run_container.get("new_run")
+                    if run_tree:
+                        fresh_otel_context = _maybe_create_otel_context(run_tree)
+                        if fresh_otel_context:
+                            with fresh_otel_context:
+                                return next(generator)
+                    return next(generator)
+
+                item: T = run_container["context"].run(next_with_otel_context)  # type: ignore[arg-type]
+            else:
+                item = run_container["context"].run(next, generator)  # type: ignore[arg-type]
+            if process_chunk:
+                traced_item = process_chunk(item)
+            else:
+                traced_item = item
+            if (
+                is_llm_run
+                and run_container["new_run"]
+                and not run_container.get("_token_event_logged")
+            ):
+                run_container["new_run"].add_event(
+                    {
+                        "name": "new_token",
+                        "time": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                        "kwargs": {"token": traced_item},
+                    }
+                )
+                run_container["_token_event_logged"] = True
+            results.append(traced_item)
+            yield item
+    except StopIteration as e:
+        return e.value
+
+
+async def _process_async_iterator(
+    generator: AsyncIterator[T],
+    run_container: _TraceableContainer,
+    *,
+    is_llm_run: bool,
+    accepts_context: bool,
+    results: list[Any],
+    process_chunk: Optional[Callable],
+    otel_context_manager: Optional[Any] = None,
+) -> AsyncGenerator[T, None]:
+    try:
+        while True:
+            if otel_context_manager:
+                # Create a fresh context manager for each iteration
+                async def anext_with_otel_context():
+                    # Get the run_tree from run_container to create a fresh context
+                    run_tree = run_container.get("new_run")
+                    if run_tree:
+                        fresh_otel_context = _maybe_create_otel_context(run_tree)
+                        if fresh_otel_context:
+                            with fresh_otel_context:
+                                return await aitertools.py_anext(generator)
+                    return await aitertools.py_anext(generator)
+
+                if accepts_context:
+                    item = await asyncio.create_task(  # type: ignore[call-arg, var-annotated]
+                        anext_with_otel_context(),
+                        context=run_container["context"],
+                    )
+                else:
+                    # Python < 3.11
+                    with tracing_context(
+                        **get_tracing_context(run_container["context"])
+                    ):
+                        item = await anext_with_otel_context()
+            else:
+                if accepts_context:
+                    item = await asyncio.create_task(  # type: ignore[call-arg, var-annotated]
+                        aitertools.py_anext(generator),  # type: ignore[arg-type]
+                        context=run_container["context"],
+                    )
+                else:
+                    # Python < 3.11
+                    with tracing_context(
+                        **get_tracing_context(run_container["context"])
+                    ):
+                        item = await aitertools.py_anext(generator)
+            if process_chunk:
+                traced_item = process_chunk(item)
+            else:
+                traced_item = item
+            if (
+                is_llm_run
+                and run_container["new_run"]
+                and not run_container.get("_token_event_logged")
+            ):
+                run_container["new_run"].add_event(
+                    {
+                        "name": "new_token",
+                        "time": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                        "kwargs": {"token": traced_item},
+                    }
+                )
+                run_container["_token_event_logged"] = True
+            results.append(traced_item)
+            yield item
+    except StopAsyncIteration:
+        pass
+
+
+T = TypeVar("T")
+
+
+class _TracedStreamBase(Generic[T]):
+    """Base class for traced stream objects."""
+
+    def __init__(
+        self,
+        stream: Union[Iterator[T], AsyncIterator[T]],
+        trace_container: _TraceableContainer,
+        reduce_fn: Optional[Callable] = None,
+    ):
+        self.__ls_stream__ = stream
+        self.__ls_trace_container__ = trace_container
+        self.__ls_completed__ = False
+        self.__ls_reduce_fn__ = reduce_fn
+        self.__ls_accumulated_output__: list[T] = []
+        self.__is_llm_run__ = (
+            trace_container["new_run"].run_type == "llm"
+            if trace_container["new_run"]
+            else False
+        )
+
+    def __getattr__(self, name: str):
+        return getattr(self.__ls_stream__, name)
+
+    def __dir__(self):
+        return list(set(dir(self.__class__) + dir(self.__ls_stream__)))
+
+    def __repr__(self):
+        return f"Traceable({self.__ls_stream__!r})"
+
+    def __str__(self):
+        return str(self.__ls_stream__)
+
+    def __del__(self):
+        try:
+            if not self.__ls_completed__:
+                self._end_trace()
+        except BaseException:
+            pass
+        try:
+            self.__ls_stream__.__del__()
+        except BaseException:
+            pass
+
+    def _end_trace(self, error: Optional[BaseException] = None):
+        if self.__ls_completed__:
+            return
+        try:
+            if self.__ls_reduce_fn__:
+                reduced_output = self.__ls_reduce_fn__(self.__ls_accumulated_output__)
+            else:
+                reduced_output = self.__ls_accumulated_output__
+            _container_end(
+                self.__ls_trace_container__,
+                outputs=reduced_output,
+                error=error,
+            )
+        finally:
+            self.__ls_completed__ = True
+
+
+class _TracedStream(_TracedStreamBase, Generic[T]):
+    """A wrapper for synchronous stream objects that handles tracing."""
+
+    def __init__(
+        self,
+        stream: Iterator[T],
+        trace_container: _TraceableContainer,
+        reduce_fn: Optional[Callable] = None,
+        process_chunk: Optional[Callable] = None,
+    ):
+        super().__init__(
+            stream=stream,
+            trace_container=trace_container,
+            reduce_fn=reduce_fn,
+        )
+        self.__ls_stream__ = stream
+        self.__ls__gen__ = _process_iterator(
+            self.__ls_stream__,
+            self.__ls_trace_container__,
+            is_llm_run=self.__is_llm_run__,
+            results=self.__ls_accumulated_output__,
+            process_chunk=process_chunk,
+        )
+
+    def __next__(self) -> T:
+        try:
+            return next(self.__ls__gen__)
+        except StopIteration:
+            self._end_trace()
+            raise
+
+    def __iter__(self) -> Iterator[T]:
+        try:
+            yield from self.__ls__gen__
+        except BaseException as e:
+            _cleanup_traceback(e)
+            self._end_trace(error=e)
+            raise
+        else:
+            self._end_trace()
+
+    def __enter__(self):
+        self.__ls_stream__.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return self.__ls_stream__.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._end_trace(error=exc_val if exc_type else None)
+
+
+class _TracedAsyncStream(_TracedStreamBase, Generic[T]):
+    """A wrapper for asynchronous stream objects that handles tracing."""
+
+    def __init__(
+        self,
+        stream: AsyncIterator[T],
+        trace_container: _TraceableContainer,
+        reduce_fn: Optional[Callable] = None,
+        process_chunk: Optional[Callable] = None,
+    ):
+        super().__init__(
+            stream=stream,
+            trace_container=trace_container,
+            reduce_fn=reduce_fn,
+        )
+        self.__ls_stream__ = stream
+        self.__ls_gen = _process_async_iterator(
+            generator=self.__ls_stream__,
+            run_container=self.__ls_trace_container__,
+            is_llm_run=self.__is_llm_run__,
+            accepts_context=aitertools.asyncio_accepts_context(),
+            results=self.__ls_accumulated_output__,
+            process_chunk=process_chunk,
+        )
+
+    async def _aend_trace(self, error: Optional[BaseException] = None):
+        ctx = copy_context()
+        await asyncio.shield(aitertools.aio_to_thread(ctx, self._end_trace, error))
+        _set_tracing_context(get_tracing_context(ctx))
+
+    async def __anext__(self) -> T:
+        try:
+            return cast(T, await aitertools.py_anext(self.__ls_gen))
+        except StopAsyncIteration:
+            await self._aend_trace()
+            raise
+
+    async def __aiter__(self) -> AsyncIterator[T]:
+        try:
+            async for item in self.__ls_gen:
+                yield item
+        except BaseException:
+            await self._aend_trace()
+            raise
+        else:
+            await self._aend_trace()
+
+    async def __aenter__(self):
+        await self.__ls_stream__.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return await self.__ls_stream__.__aexit__(exc_type, exc_val, exc_tb)
+        finally:
+            await self._aend_trace()
+
+
+def _get_function_result(results: list, reduce_fn: Callable) -> Any:
+    if results:
+        if reduce_fn is not None:
+            try:
+                return reduce_fn(results)
+            except BaseException as e:
+                LOGGER.error(e)
+                return results
+        else:
+            return results
+
+
+def _cleanup_traceback(e: BaseException):
+    tb_ = e.__traceback__
+    if tb_:
+        while tb_.tb_next is not None and tb_.tb_frame.f_code.co_filename.endswith(
+            _EXCLUDED_FRAME_FNAME
+        ):
+            tb_ = tb_.tb_next
+        e.__traceback__ = tb_
+
+
+def _is_otel_available() -> bool:
+    """Cache for otel import check."""
+    global _OTEL_AVAILABLE
+    if _OTEL_AVAILABLE is None:
+        try:
+            import opentelemetry.trace  # noqa: F401
+
+            _OTEL_AVAILABLE = True
+        except ImportError:
+            _OTEL_AVAILABLE = False
+    return _OTEL_AVAILABLE
+
+
+def _maybe_create_otel_context(run_tree: Optional[run_trees.RunTree]):
+    """Create OpenTelemetry context manager if OTEL is enabled and available.
+
+    Args:
+        run_tree: The current run tree.
+
+    Returns:
+        Context manager for use_span or None if not available.
+    """
+    if not run_tree or run_tree.client.otel_exporter is None:
+        return None
+    if not _is_otel_available():
+        return None
+
+    from opentelemetry.trace import (  # type: ignore[import]
+        NonRecordingSpan,
+        SpanContext,
+        TraceFlags,
+        TraceState,
+        use_span,
+    )
+
+    from langsmith._internal._otel_utils import (
+        get_otel_span_id_from_uuid,
+        get_otel_trace_id_from_uuid,
+    )
+
+    trace_id = get_otel_trace_id_from_uuid(run_tree.trace_id)
+    span_id = get_otel_span_id_from_uuid(run_tree.id)
+
+    span_context = SpanContext(
+        trace_id=trace_id,
+        span_id=span_id,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=TraceState(),
+    )
+
+    non_recording_span = NonRecordingSpan(span_context)
+    return use_span(non_recording_span)
+
+
+# For backwards compatibility
+_PROJECT_NAME = _context._PROJECT_NAME
+_TAGS = _context._TAGS
+_METADATA = _context._METADATA
+_TRACING_ENABLED = _context._TRACING_ENABLED
+_CLIENT = _context._CLIENT
+_PARENT_RUN_TREE_REF = _context._PARENT_RUN_TREE_REF
+context._METADATA
+_TRACING_ENABLED = _context._TRACING_ENABLED
+_CLIENT = _context._CLIENT
+_PARENT_RUN_TREE_REF = _context._PARENT_RUN_TREE_REF
+ or None if not available.
+    """
+    if not run_tree or run_tree.client.otel_exporter is None:
+        return None
+    if not _is_otel_available():
+        return None
+
+    from opentelemetry.trace import (  # type: ignore[import]
+        NonRecordingSpan,
+        SpanContext,
+        TraceFlags,
+        TraceState,
+        use_span,
+    )
+
+    from langsmith._internal._otel_utils import (
+        get_otel_span_id_from_uuid,
+        get_otel_trace_id_from_uuid,
+    )
+
+    trace_id = get_otel_trace_id_from_uuid(run_tree.trace_id)
+    span_id = get_otel_span_id_from_uuid(run_tree.id)
+
+    span_context = SpanContext(
+        trace_id=trace_id,
+        span_id=span_id,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=TraceState(),
+    )
+
+    non_recording_span = NonRecordingSpan(span_context)
+    return use_span(non_recording_span)
+
+
+# For backwards compatibility
+_PROJECT_NAME = _context._PROJECT_NAME
+_TAGS = _context._TAGS
+_METADATA = _context._METADATA
+_TRACING_ENABLED = _context._TRACING_ENABLED
+_CLIENT = _context._CLIENT
+_PARENT_RUN_TREE_REF = _context._PARENT_RUN_TREE_REF
+ontext._PARENT_RUN_TREE_REF
+  item = await asyncio.create_task(  # type: ignore[call-arg, var-annotated]
+                        aitertools.py_anext(generator),  # type: ignore[arg-type]
+                        context=run_container["context"],
+                    )
+                else:
+                    # Python < 3.11
+                    with tracing_context(
+                        **get_tracing_context(run_container["context"])
+                    ):
+                        item = await aitertools.py_anext(generator)
+            if process_chunk:
+                traced_item = process_chunk(item)
+            else:
+                traced_item = item
+            if (
+                is_llm_run
+                and run_container["new_run"]
+                and not run_container.get("_token_event_logged")
+            ):
+                run_container["new_run"].add_event(
+                    {
+                        "name": "new_token",
+                        "time": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                        "kwargs": {"token": traced_item},
+                    }
+                )
+                run_container["_token_event_logged"] = True
+            results.append(traced_item)
+            yield item
+    except StopAsyncIteration:
+        pass
+
+
+T = TypeVar("T")
+
+
+class _TracedStreamBase(Generic[T]):
+    """Base class for traced stream objects."""
+
+    def __init__(
+        self,
+        stream: Union[Iterator[T], AsyncIterator[T]],
+        trace_container: _TraceableContainer,
+        reduce_fn: Optional[Callable] = None,
+    ):
+        self.__ls_stream__ = stream
+        self.__ls_trace_container__ = trace_container
+        self.__ls_completed__ = False
+        self.__ls_reduce_fn__ = reduce_fn
+        self.__ls_accumulated_output__: list[T] = []
+        self.__is_llm_run__ = (
+            trace_container["new_run"].run_type == "llm"
+            if trace_container["new_run"]
+            else False
+        )
+
+    def __getattr__(self, name: str):
+        return getattr(self.__ls_stream__, name)
+
+    def __dir__(self):
+        return list(set(dir(self.__class__) + dir(self.__ls_stream__)))
+
+    def __repr__(self):
+        return f"Traceable({self.__ls_stream__!r})"
+
+    def __str__(self):
+        return str(self.__ls_stream__)
+
+    def __del__(self):
+        try:
+            if not self.__ls_completed__:
+                self._end_trace()
+        except BaseException:
+            pass
+        try:
+            self.__ls_stream__.__del__()
+        except BaseException:
+            pass
+
+    def _end_trace(self, error: Optional[BaseException] = None):
+        if self.__ls_completed__:
+            return
+        try:
+            if self.__ls_reduce_fn__:
+                reduced_output = self.__ls_reduce_fn__(self.__ls_accumulated_output__)
+            else:
+                reduced_output = self.__ls_accumulated_output__
+            _container_end(
+                self.__ls_trace_container__,
+                outputs=reduced_output,
+                error=error,
+            )
+        finally:
+            self.__ls_completed__ = True
+
+
+class _TracedStream(_TracedStreamBase, Generic[T]):
+    """A wrapper for synchronous stream objects that handles tracing."""
+
+    def __init__(
+        self,
+        stream: Iterator[T],
+        trace_container: _TraceableContainer,
+        reduce_fn: Optional[Callable] = None,
+        process_chunk: Optional[Callable] = None,
+    ):
+        super().__init__(
+            stream=stream,
+            trace_container=trace_container,
+            reduce_fn=reduce_fn,
+        )
+        self.__ls_stream__ = stream
+        self.__ls__gen__ = _process_iterator(
+            self.__ls_stream__,
+            self.__ls_trace_container__,
+            is_llm_run=self.__is_llm_run__,
+            results=self.__ls_accumulated_output__,
+            process_chunk=process_chunk,
+        )
+
+    def __next__(self) -> T:
+        try:
+            return next(self.__ls__gen__)
+        except StopIteration:
+            self._end_trace()
+            raise
+
+    def __iter__(self) -> Iterator[T]:
+        try:
+            yield from self.__ls__gen__
+        except BaseException as e:
+            _cleanup_traceback(e)
+            self._end_trace(error=e)
+            raise
+        else:
+            self._end_trace()
+
+    def __enter__(self):
+        self.__ls_stream__.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return self.__ls_stream__.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._end_trace(error=exc_val if exc_type else None)
+
+
+class _TracedAsyncStream(_TracedStreamBase, Generic[T]):
+    """A wrapper for asynchronous stream objects that handles tracing."""
+
+    def __init__(
+        self,
+        stream: AsyncIterator[T],
+        trace_container: _TraceableContainer,
+        reduce_fn: Optional[Callable] = None,
+        process_chunk: Optional[Callable] = None,
+    ):
+        super().__init__(
+            stream=stream,
+            trace_container=trace_container,
+            reduce_fn=reduce_fn,
+        )
+        self.__ls_stream__ = stream
+        self.__ls_gen = _process_async_iterator(
+            generator=self.__ls_stream__,
+            run_container=self.__ls_trace_container__,
+            is_llm_run=self.__is_llm_run__,
+            accepts_context=aitertools.asyncio_accepts_context(),
+            results=self.__ls_accumulated_output__,
+            process_chunk=process_chunk,
+        )
+
+    async def _aend_trace(self, error: Optional[BaseException] = None):
+        ctx = copy_context()
+        await asyncio.shield(aitertools.aio_to_thread(ctx, self._end_trace, error))
+        _set_tracing_context(get_tracing_context(ctx))
+
+    async def __anext__(self) -> T:
+        try:
+            return cast(T, await aitertools.py_anext(self.__ls_gen))
+        except StopAsyncIteration:
+            await self._aend_trace()
+            raise
+
+    async def __aiter__(self) -> AsyncIterator[T]:
+        try:
+            async for item in self.__ls_gen:
+                yield item
+        except BaseException:
+            await self._aend_trace()
+            raise
+        else:
+            await self._aend_trace()
+
+    async def __aenter__(self):
+        await self.__ls_stream__.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return await self.__ls_stream__.__aexit__(exc_type, exc_val, exc_tb)
+        finally:
+            await self._aend_trace()
+
+
+def _get_function_result(results: list, reduce_fn: Callable) -> Any:
+    if results:
+        if reduce_fn is not None:
+            try:
+                return reduce_fn(results)
+            except BaseException as e:
+                LOGGER.error(e)
+                return results
+        else:
+            return results
+
+
+def _cleanup_traceback(e: BaseException):
+    tb_ = e.__traceback__
+    if tb_:
+        while tb_.tb_next is not None and tb_.tb_frame.f_code.co_filename.endswith(
+            _EXCLUDED_FRAME_FNAME
+        ):
+            tb_ = tb_.tb_next
+        e.__traceback__ = tb_
+
+
+def _is_otel_available() -> bool:
+    """Cache for otel import check."""
+    global _OTEL_AVAILABLE
+    if _OTEL_AVAILABLE is None:
+        try:
+            import opentelemetry.trace  # noqa: F401
+
+            _OTEL_AVAILABLE = True
+        except ImportError:
+            _OTEL_AVAILABLE = False
+    return _OTEL_AVAILABLE
+
+
+def _maybe_create_otel_context(run_tree: Optional[run_trees.RunTree]):
+    """Create OpenTelemetry context manager if OTEL is enabled and available.
+
+    Args:
+        run_tree: The current run tree.
+
+    Returns:
+        Context manager for use_span or None if not available.
+    """
+    if not run_tree or run_tree.client.otel_exporter is None:
+        return None
+    if not _is_otel_available():
+        return None
+
+    from opentelemetry.trace import (  # type: ignore[import]
+        NonRecordingSpan,
+        SpanContext,
+        TraceFlags,
+        TraceState,
+        use_span,
+    )
+
+    from langsmith._internal._otel_utils import (
+        get_otel_span_id_from_uuid,
+        get_otel_trace_id_from_uuid,
+    )
+
+    trace_id = get_otel_trace_id_from_uuid(run_tree.trace_id)
+    span_id = get_otel_span_id_from_uuid(run_tree.id)
+
+    span_context = SpanContext(
+        trace_id=trace_id,
+        span_id=span_id,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=TraceState(),
+    )
+
+    non_recording_span = NonRecordingSpan(span_context)
+    return use_span(non_recording_span)
+
+
+# For backwards compatibility
+_PROJECT_NAME = _context._PROJECT_NAME
+_TAGS = _context._TAGS
+_METADATA = _context._METADATA
+_TRACING_ENABLED = _context._TRACING_ENABLED
+_CLIENT = _context._CLIENT
+_PARENT_RUN_TREE_REF = _context._PARENT_RUN_TREE_REF
+                chunk = self._protocol.read_queue.popleft()
+            except IndexError:
+                if self._closed:
+                    raise ClosedResourceError from None
+                elif self._protocol.exception:
+                    raise BrokenResourceError from self._protocol.exception
+                else:
+                    raise EndOfStream from None
+
+            if len(chunk) > max_bytes:
+                # Split the oversized chunk
+                chunk, leftover = chunk[:max_bytes], chunk[max_bytes:]
+                self._protocol.read_queue.appendleft(leftover)
+
+            # If the read queue is empty, clear the flag so that the next call will
+            # block until data is available
+            if not self._protocol.read_queue:
+                self._protocol.read_event.clear()
+
+        return chunk
+
+    async def send(self, item: bytes) -> None:
+        with self._send_guard:
+            await AsyncIOBackend.checkpoint()
+
+            if self._closed:
+                raise ClosedResourceError
+            elif self._protocol.exception is not None:
+                raise BrokenResourceError from self._protocol.exception
+
+            try:
+                self._transport.write(item)
+            except RuntimeError as exc:
+                if self._transport.is_closing():
+                    raise BrokenResourceError from exc
+                else:
+                    raise
+
+            await self._protocol.write_event.wait()
+
+    async def send_eof(self) -> None:
+        try:
+            self._transport.write_eof()
+        except OSError:
+            pass
+
+    async def aclose(self) -> None:
+        self._closed = True
+        if not self._transport.is_closing():
+            try:
+                self._transport.write_eof()
+            except OSError:
+                pass
+
+            self._transport.close()
+            await sleep(0)
+            self._transport.abort()
+
+
+class _RawSocketMixin:
+    _receive_future: asyncio.Future | None = None
+    _send_future: asyncio.Future | None = None
+    _closing = False
+
+    def __init__(self, raw_socket: socket.socket):
+        self.__raw_socket = raw_socket
+        self._receive_guard = ResourceGuard("reading from")
+        self._send_guard = ResourceGuard("writing to")
+
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self.__raw_socket
+
+    def _wait_until_readable(self, loop: asyncio.AbstractEventLoop) -> asyncio.Future:
+        def callback(f: object) -> None:
+            del self._receive_future
+            loop.remove_reader(self.__raw_socket)
+
+        f = self._receive_future = asyncio.Future()
+        loop.add_reader(self.__raw_socket, f.set_result, None)
+        f.add_done_callback(callback)
+        return f
+
+    def _wait_until_writable(self, loop: asyncio.AbstractEventLoop) -> asyncio.Future:
+        def callback(f: object) -> None:
+            del self._send_future
+            loop.remove_writer(self.__raw_socket)
+
+        f = self._send_future = asyncio.Future()
+        loop.add_writer(self.__raw_socket, f.set_result, None)
+        f.add_done_callback(callback)
+        return f
+
+    async def aclose(self) -> None:
+        if not self._closing:
+            self._closing = True
+            if self.__raw_socket.fileno() != -1:
+                self.__raw_socket.close()
+
+            if self._receive_future:
+                self._receive_future.set_result(None)
+            if self._send_future:
+                self._send_future.set_result(None)
+
+
+class UNIXSocketStream(_RawSocketMixin, abc.UNIXSocketStream):
+    async def send_eof(self) -> None:
+        with self._send_guard:
+            self._raw_socket.shutdown(socket.SHUT_WR)
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        loop = get_running_loop()
+        await AsyncIOBackend.checkpoint()
+        with self._receive_guard:
+            while True:
+                try:
+                    data = self._raw_socket.recv(max_bytes)
+                except BlockingIOError:
+                    await self._wait_until_readable(loop)
+                except OSError as exc:
+                    if self._closing:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+                else:
+                    if not data:
+                        raise EndOfStream
+
+                    return data
+
+    async def send(self, item: bytes) -> None:
+        loop = get_running_loop()
+        await AsyncIOBackend.checkpoint()
+        with self._send_guard:
+            view = memoryview(item)
+            while view:
+                try:
+                    bytes_sent = self._raw_socket.send(view)
+                except BlockingIOError:
+                    await self._wait_until_writable(loop)
+                except OSError as exc:
+                    if self._closing:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+                else:
+                    view = view[bytes_sent:]
+
+    async def receive_fds(self, msglen: int, maxfds: int) -> tuple[bytes, list[int]]:
+        if not isinstance(msglen, int) or msglen < 0:
+            raise ValueError("msglen must be a non-negative integer")
+        if not isinstance(maxfds, int) or maxfds < 1:
+            raise ValueError("maxfds must be a positive integer")
+
+        loop = get_running_loop()
+        fds = array.array("i")
+        await AsyncIOBackend.checkpoint()
+        with self._receive_guard:
+            while True:
+                try:
+                    message, ancdata, flags, addr = self._raw_socket.recvmsg(
+                        msglen, socket.CMSG_LEN(maxfds * fds.itemsize)
+                    )
+                except BlockingIOError:
+                    await self._wait_until_readable(loop)
+                except OSError as exc:
+                    if self._closing:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+                else:
+                    if not message and not ancdata:
+                        raise EndOfStream
+
+                    break
+
+        for cmsg_level, cmsg_type, cmsg_data in ancdata:
+            if cmsg_level != socket.SOL_SOCKET or cmsg_type != socket.SCM_RIGHTS:
+                raise RuntimeError(
+                    f"Received unexpected ancillary data; message = {message!r}, "
+                    f"cmsg_level = {cmsg_level}, cmsg_type = {cmsg_type}"
+                )
+
+            fds.frombytes(cmsg_data[: len(cmsg_data) - (len(cmsg_data) % fds.itemsize)])
+
+        return message, list(fds)
+
+    async def send_fds(self, message: bytes, fds: Collection[int | IOBase]) -> None:
+        if not message:
+            raise ValueError("message must not be empty")
+        if not fds:
+            raise ValueError("fds must not be empty")
+
+        loop = get_running_loop()
+        filenos: list[int] = []
+        for fd in fds:
+            if isinstance(fd, int):
+                filenos.append(fd)
+            elif isinstance(fd, IOBase):
+                filenos.append(fd.fileno())
+
+        fdarray = array.array("i", filenos)
+        await AsyncIOBackend.checkpoint()
+        with self._send_guard:
+            while True:
+                try:
+                    # The ignore can be removed after mypy picks up
+                    # https://github.com/python/typeshed/pull/5545
+                    self._raw_socket.sendmsg(
+                        [message], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fdarray)]
+                    )
+                    break
+                except BlockingIOError:
+                    await self._wait_until_writable(loop)
+                except OSError as exc:
+                    if self._closing:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+
+
+class TCPSocketListener(abc.SocketListener):
+    _accept_scope: CancelScope | None = None
+    _closed = False
+
+    def __init__(self, raw_socket: socket.socket):
+        self.__raw_socket = raw_socket
+        self._loop = cast(asyncio.BaseEventLoop, get_running_loop())
+        self._accept_guard = ResourceGuard("accepting connections from")
+
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self.__raw_socket
+
+    async def accept(self) -> abc.SocketStream:
+        if self._closed:
+            raise ClosedResourceError
+
+        with self._accept_guard:
+            await AsyncIOBackend.checkpoint()
+            with CancelScope() as self._accept_scope:
+                try:
+                    client_sock, _addr = await self._loop.sock_accept(self._raw_socket)
+                except asyncio.CancelledError:
+                    # Workaround for https://bugs.python.org/issue41317
+                    try:
+                        self._loop.remove_reader(self._raw_socket)
+                    except (ValueError, NotImplementedError):
+                        pass
+
+                    if self._closed:
+                        raise ClosedResourceError from None
+
+                    raise
+                finally:
+                    self._accept_scope = None
+
+        client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        transport, protocol = await self._loop.connect_accepted_socket(
+            StreamProtocol, client_sock
+        )
+        return SocketStream(transport, protocol)
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+
+        self._closed = True
+        if self._accept_scope:
+            # Workaround for https://bugs.python.org/issue41317
+            try:
+                self._loop.remove_reader(self._raw_socket)
+            except (ValueError, NotImplementedError):
+                pass
+
+            self._accept_scope.cancel()
+            await sleep(0)
+
+        self._raw_socket.close()
+
+
+class UNIXSocketListener(abc.SocketListener):
+    def __init__(self, raw_socket: socket.socket):
+        self.__raw_socket = raw_socket
+        self._loop = get_running_loop()
+        self._accept_guard = ResourceGuard("accepting connections from")
+        self._closed = False
+
+    async def accept(self) -> abc.SocketStream:
+        await AsyncIOBackend.checkpoint()
+        with self._accept_guard:
+            while True:
+                try:
+                    client_sock, _ = self.__raw_socket.accept()
+                    client_sock.setblocking(False)
+                    return UNIXSocketStream(client_sock)
+                except BlockingIOError:
+                    f: asyncio.Future = asyncio.Future()
+                    self._loop.add_reader(self.__raw_socket, f.set_result, None)
+                    f.add_done_callback(
+                        lambda _: self._loop.remove_reader(self.__raw_socket)
+                    )
+                    await f
+                except OSError as exc:
+                    if self._closed:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+
+    async def aclose(self) -> None:
+        self._closed = True
+        self.__raw_socket.close()
+
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self.__raw_socket
+
+
+class UDPSocket(abc.UDPSocket):
+    def __init__(
+        self, transport: asyncio.DatagramTransport, protocol: DatagramProtocol
+    ):
+        self._transport = transport
+        self._protocol = protocol
+        self._receive_guard = ResourceGuard("reading from")
+        self._send_guard = ResourceGuard("writing to")
+        self._closed = False
+
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self._transport.get_extra_info("socket")
+
+    async def aclose(self) -> None:
+        self._closed = True
+        if not self._transport.is_closing():
+            self._transport.close()
+
+    async def receive(self) -> tuple[bytes, IPSockAddrType]:
+        with self._receive_guard:
+            await AsyncIOBackend.checkpoint()
+
+            # If the buffer is empty, ask for more data
+            if not self._protocol.read_queue and not self._transport.is_closing():
+                self._protocol.read_event.clear()
+                await self._protocol.read_event.wait()
+
+            try:
+                return self._protocol.read_queue.popleft()
+            except IndexError:
+                if self._closed:
+                    raise ClosedResourceError from None
+                else:
+                    raise BrokenResourceError from None
+
+    async def send(self, item: UDPPacketType) -> None:
+        with self._send_guard:
+            await AsyncIOBackend.checkpoint()
+            await self._protocol.write_event.wait()
+            if self._closed:
+                raise ClosedResourceError
+            elif self._transport.is_closing():
+                raise BrokenResourceError
+            else:
+                self._transport.sendto(*item)
+
+
+class ConnectedUDPSocket(abc.ConnectedUDPSocket):
+    def __init__(
+        self, transport: asyncio.DatagramTransport, protocol: DatagramProtocol
+    ):
+        self._transport = transport
+        self._protocol = protocol
+        self._receive_guard = ResourceGuard("reading from")
+        self._send_guard = ResourceGuard("writing to")
+        self._closed = False
+
+    @property
+    def _raw_socket(self) -> socket.socket:
+        return self._transport.get_extra_info("socket")
+
+    async def aclose(self) -> None:
+        self._closed = True
+        if not self._transport.is_closing():
+            self._transport.close()
+
+    async def receive(self) -> bytes:
+        with self._receive_guard:
+            await AsyncIOBackend.checkpoint()
+
+            # If the buffer is empty, ask for more data
+            if not self._protocol.read_queue and not self._transport.is_closing():
+                self._protocol.read_event.clear()
+                await self._protocol.read_event.wait()
+
+            try:
+                packet = self._protocol.read_queue.popleft()
+            except IndexError:
+                if self._closed:
+                    raise ClosedResourceError from None
+                else:
+                    raise BrokenResourceError from None
+
+            return packet[0]
+
+    async def send(self, item: bytes) -> None:
+        with self._send_guard:
+            await AsyncIOBackend.checkpoint()
+            await self._protocol.write_event.wait()
+            if self._closed:
+                raise ClosedResourceError
+            elif self._transport.is_closing():
+                raise BrokenResourceError
+            else:
+                self._transport.sendto(item)
+
+
+class UNIXDatagramSocket(_RawSocketMixin, abc.UNIXDatagramSocket):
+    async def receive(self) -> UNIXDatagramPacketType:
+        loop = get_running_loop()
+        await AsyncIOBackend.checkpoint()
+        with self._receive_guard:
+            while True:
+                try:
+                    data = self._raw_socket.recvfrom(65536)
+                except BlockingIOError:
+                    await self._wait_until_readable(loop)
+                except OSError as exc:
+                    if self._closing:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+                else:
+                    return data
+
+    async def send(self, item: UNIXDatagramPacketType) -> None:
+        loop = get_running_loop()
+        await AsyncIOBackend.checkpoint()
+        with self._send_guard:
+            while True:
+                try:
+                    self._raw_socket.sendto(*item)
+                except BlockingIOError:
+                    await self._wait_until_writable(loop)
+                except OSError as exc:
+                    if self._closing:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+                else:
+                    return
+
+
+class ConnectedUNIXDatagramSocket(_RawSocketMixin, abc.ConnectedUNIXDatagramSocket):
+    async def receive(self) -> bytes:
+        loop = get_running_loop()
+        await AsyncIOBackend.checkpoint()
+        with self._receive_guard:
+            while True:
+                try:
+                    data = self._raw_socket.recv(65536)
+                except BlockingIOError:
+                    await self._wait_until_readable(loop)
+                except OSError as exc:
+                    if self._closing:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+                else:
+                    return data
+
+    async def send(self, item: bytes) -> None:
+        loop = get_running_loop()
+        await AsyncIOBackend.checkpoint()
+        with self._send_guard:
+            while True:
+                try:
+                    self._raw_socket.send(item)
+                except BlockingIOError:
+                    await self._wait_until_writable(loop)
+                except OSError as exc:
+                    if self._closing:
+                        raise ClosedResourceError from None
+                    else:
+                        raise BrokenResourceError from exc
+                else:
+                    return
+
+
+_read_events: RunVar[dict[int, asyncio.Future[bool]]] = RunVar("read_events")
+_write_events: RunVar[dict[int, asyncio.Future[bool]]] = RunVar("write_events")
+
+
+#
+# Synchronization
+#
+
+
+class Event(BaseEvent):
+    def __new__(cls) -> Event:
+        return object.__new__(cls)
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+
+    def set(self) -> None:
+        self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    async def wait(self) -> None:
+        if self.is_set():
+            await AsyncIOBackend.checkpoint()
+        else:
+            await self._event.wait()
+
+    def statistics(self) -> EventStatistics:
+        return EventStatistics(len(self._event._waiters))
+
+
+class Lock(BaseLock):
+    def __new__(cls, *, fast_acquire: bool = False) -> Lock:
+        return object.__new__(cls)
+
+    def __init__(self, *, fast_acquire: bool = False) -> None:
+        self._fast_acquire = fast_acquire
+        self._owner_task: asyncio.Task | None = None
+        self._waiters: deque[tuple[asyncio.Task, asyncio.Future]] = deque()
+
+    async def acquire(self) -> None:
+        task = cast(asyncio.Task, current_task())
+        if self._owner_task is None and not self._waiters:
+            await AsyncIOBackend.checkpoint_if_cancelled()
+            self._owner_task = task
+
+            # Unless on the "fast path", yield control of the event loop so that other
+            # tasks can run too
+            if not self._fast_acquire:
+                try:
+                    await AsyncIOBackend.cancel_shielded_checkpoint()
+                except CancelledError:
+                    self.release()
+                    raise
+
+            return
+
+        if self._owner_task == task:
+            raise RuntimeError("Attempted to acquire an already held Lock")
+
+        fut: asyncio.Future[None] = asyncio.Future()
+        item = task, fut
+        self._waiters.append(item)
+        try:
+            await fut
+        except CancelledError:
+            self._waiters.remove(item)
+            if self._owner_task is task:
+                self.release()
+
+            raise
+
+        self._waiters.remove(item)
+
+    def acquire_nowait(self) -> None:
+        task = cast(asyncio.Task, current_task())
+        if self._owner_task is None and not self._waiters:
+            self._owner_task = task
+            return
+
+        if self._owner_task is task:
+            raise RuntimeError("Attempted to acquire an already held Lock")
+
+        raise WouldBlock
+
+    def locked(self) -> bool:
+        return self._owner_task is not None
+
+    def release(self) -> None:
+        if self._owner_task != current_task():
+            raise RuntimeError("The current task is not holding this lock")
+
+        for task, fut in self._waiters:
+            if not fut.cancelled():
+                self._owner_task = task
+                fut.set_result(None)
+                return
+
+        self._owner_task = None
+
+    def statistics(self) -> LockStatistics:
+        task_info = AsyncIOTaskInfo(self._owner_task) if self._owner_task else None
+        return LockStatistics(self.locked(), task_info, len(self._waiters))
+
+
+class Semaphore(BaseSemaphore):
+    def __new__(
+        cls,
+        initial_value: int,
+        *,
+        max_value: int | None = None,
+        fast_acquire: bool = False,
+    ) -> Semaphore:
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        initial_value: int,
+        *,
+        max_value: int | None = None,
+        fast_acquire: bool = False,
+    ):
+        super().__init__(initial_value, max_value=max_value)
+        self._value = initial_value
+        self._max_value = max_value
+        self._fast_acquire = fast_acquire
+        self._waiters: deque[asyncio.Future[None]] = deque()
+
+    async def acquire(self) -> None:
+        if self._value > 0 and not self._waiters:
+            await AsyncIOBackend.checkpoint_if_cancelled()
+            self._value -= 1
+
+            # Unless on the "fast path", yield control of the event loop so that other
+            # tasks can run too
+            if not self._fast_acquire:
+                try:
+                    await AsyncIOBackend.cancel_shielded_checkpoint()
+                except CancelledError:
+                    self.release()
+                    raise
+
+            return
+
+        fut: asyncio.Future[None] = asyncio.Future()
+        self._waiters.append(fut)
+        try:
+            await fut
+        except CancelledError:
+            try:
+             PnÊ   ğmÊ   ¨.ú
+    Ñ¾   pï¾   0¹H	   €Ù¾   0¹H	   ï¾   0 	   ¨.ú
+   @ì¾   ğí¾   `¤V	   ¨.ú
+   `¤V	   €Ü¾   í¾   ğœ	   ¨.ú
+   ğœ	   €î¾   0Û¾   °6m   ¨.ú
+   °6m    Û¾   ğğ¾   ğB	   ¨.ú
+   ğB	    ñ¾   Pñ¾   pƒ	   ¨.ú
+   pƒ	   €ñ¾   °ñ¾   0äø   ¨.ú
+   0äø   àñ¾   ò¾   €´V	   ¨.ú
+   €´V	   @ò¾   pò¾   éú
+   ¨.ú
+   éú
+    ò¾   Ğò¾   hîú
+   ¨.ú
+   hîú
+    ó¾   0ó¾   pË		   ¨.ú
+   pË		   `ó¾   ó¾   0!
+	   p7ú
+   Àó¾   ˜áî
+   ğ
+	   ğó¾   0!
+	   P6ú
+    ô¾    'ï
+   7ú
+   Pô¾   h'ï
+   7ú
+   €ô¾   À&ï
+   7ú
+   °ô¾   €(ï
+   7ú
+   àô¾   (ï
+   7ú
+   õ¾   h*ï
+   7ú
+   @õ¾   °+ï
+   7ú
+   €6ú
+   ¨.ú
+   põ¾    õ¾   °6m   Ğõ¾   °6m    ö¾   ğ6m   ¨.ú
+   0ö¾   `ö¾   È•õ
+   ö¾   È•õ
+   P6ú
+   Àö¾   °t	   7ú
+   ğö¾   °	   7ú
+    ÷¾    j	   7ú
+   P÷¾   È)ï
+   7ú
+   €÷¾   0ğ		   7ú
+   °÷¾    t	   7ú
+   à÷¾   pŠ	   7ú
+   ø¾   0Š	   7ú
+   @ø¾   ğö	   7ú
+   pø¾   PÊ		   7ú
+    ø¾   s	   7ú
+   Ğø¾    ğ   7ú
+    ù¾   °'	   7ú
+   0ù¾   ğ%	   7ú
+   p×ª   0%	   7ú
+   €6ú
+   ¨.ú
+   `ù¾   ğØª   ğ;›	   ù¾   ğ;›	   Àù¾   H•õ
+   7ú
+   ğù¾   °$	   7ú
+    ú¾   p(	   7ú
+   Pú¾   0(	   ¨.ú
+   €ú¾   °ú¾   °Œ   p7ú
+   àú¾   0¯   0k   p7ú
+   û¾   pn	    —   @û¾   °Œ   pû¾   pn	   ¨.ú
+    û¾   Ğû¾   °Œ    ü¾   °Œ   0ü¾   çr	   `ü¾   ü¾   °ƒ™   ¨.ú
+   Àü¾   ğü¾   °Œ    ı¾   °Œ   Pı¾   p]š   7ú
+   €ı¾   €ß   7ú
+   °ı¾   P1]	   ¨.ú
+   àı¾   ş¾   °Œ   p7ú
+   @ş¾   0¯   0k   pş¾   °Œ    ş¾   Ğş¾    ÿ¾   0ÿ¾   ğÚª   ¨.ú
+   `ÿ¾   ÿ¾   °Œ   p7ú
+   °ôª   °²b   @—   Àÿ¾   °Œ   P6ú
+   pèª   ĞÔÅ   0€¿   ğİª    ÕÅ   7ú
+   €6ú
+   ¨.ú
+   `€¿   €¿   °Œ   p7ú
+   À€¿   °ªú
+   p÷ª   ğ€¿   °Œ    ¿   0j   ¨.ú
+   P¿   €¿   °Œ   p7ú
+   °¿   p]š   ğ[š   à¿   °Œ   ‚¿   °ib   ¨.ú
+   @‚¿   p‚¿   °t	   °9ú
+   °t	   °t	   ¨.ú
+   ¨.ú
+    ‚¿   Ğ‚¿   €éï
+    ƒ¿   €éï
+   0ƒ¿   °±	   ¨.ú
+   `ƒ¿   ƒ¿   p7º   p7ú
+   Àƒ¿   0~     Æ[   ğƒ¿   p7º    „¿   ğÛı   ¨.ú
+   ¨.ú
+   P„¿   °t	    C   @:ú
+    C    C   €„¿   €´V	   p7ú
+   °„¿   pwT	   P6ú
+   à„¿   (zú
+   €6ú
+   (zú
+   (zú
+   (zú
+   ¨.ú
+   €´V	   €´V	   €´V	   pwT	   (zú
+   €´V	   …¿   0àª   °9ú
+   @…¿   H¥ú
+   à?ú
+   p…¿   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+    …¿   °6m   p7ú
+   Ğ…¿   °8m   @@ú
+   °6m   °6m   @:ú
+   H¥ú
+   àEú
+    †¿   0õª   °9ú
+   0†¿   pn	   p7ú
+   °İª   05”   7ú
+   pn	   `†¿   °çª   °9ú
+   †¿   pn	   p7ú
+   À†¿   0¿b   7ú
+   pn	   ğ†¿    ‡¿   °9ú
+   P‡¿   pn	   p7ú
+   €‡¿   €ºL   7ú
+   pn	   °‡¿   0üª   °9ú
+   à‡¿   pn	   p7ú
+   ˆ¿   0‹b   7ú
+   pn	   @ˆ¿   pˆ¿   °9ú
+    ˆ¿   pn	   p7ú
+   °àª   0½b   7ú
+   pn	   Ğˆ¿    ‰¿   °9ú
+   0‰¿   pn	   p7ú
+   `‰¿   0ªL   7ú
+   pn	   ‰¿   ğõª   °9ú
+   À‰¿   p]š   p7ú
+   ğ‰¿   ptš   7ú
+   p]š   ğòª   ğÜª   °9ú
+    Š¿   p]š   p7ú
+   ğåÎ   °sš   7ú
+   p]š   @Fú
+   ¨.ú
+   ğàª   °ùÎ   @:ú
+   °ùÎ   °ùÎ   pùÎ   pÕÅ   ¨.ú
+   PŠ¿   ğùÎ   °9ú
+   €Š¿   pŠ	   à?ú
+   °Š¿   à®ğ
+   @@ú
+   à®ğ
+   à®ğ
+   @:ú
+   pŠ	   àŠ¿   ¨.ú
+   ‹¿   pòÎ   ğ]š   P6ú
+   €6ú
+   @‹¿   p‹¿   pŠ	   à?ú
+    ‹¿   p]š   p7ú
+   Ğ‹¿   Ğ×K   @@ú
+   p]š   p]š   °9ú
+   pŠ	   ¨.ú
+   ¨.ú
+   ÁÇ   ĞÂÇ   ¨.ú
+    Œ¿   0Œ¿   pn	   p7ú
+   °òÎ   ğ]š   P6ú
+   €6ú
+   ¨.ú
+   pn	   ¨.ú
+   Ğ:ú
+   `Œ¿   ğœ	   p7ú
+   ğœ	   Œ¿   p	   ¨.ú
+   ğœ	   ÀŒ¿   ğòÎ   °åÎ   P6ú
+   ğŒ¿   °¬   °9ú
+    ¿   p]š   p7ú
+   P¿   Ğ×K   7ú
+   p]š   €6ú
+   °¬   °¬   °¬   °¬   €¿   °¿   €(ï
+   à?ú
+   à¿   7ú
+   ¿   7ú
+   @¿   @@ú
+   °9ú
+   €(ï
+   ¨.ú
+   ¨.ú
+   °¸   °¸   ¨.ú
+   p¿    _	   @:ú
+    _	    _	    ¿   pn	   p7ú
+   påÎ   05”   p7ú
+   Ğ¿   0ï
+   P6ú
+    ¿   pË		   p7ú
+   pË		   0¿   X!ğ
+   P6ú
+   `¿   °¬   €6ú
+   °¬   °¬   °¬   €6ú
+   pË		   pË		   ¨.ú
+   pn	   pn	   pn	   05”   0ï
+   pË		   pn	   ¿   °9ú
+   ¨.ú
+   ¨.ú
+   À¿   ¨.ú
+   ¨.ú
+   ğ¿   °9ú
+   ¨.ú
+   ¨.ú
+    ¿   pn	   p7ú
+   pn	   0òÎ   05”   p7ú
+   P¿    Ûú
+   P6ú
+   €¿    _	   €6ú
+    _	    _	    _	   ¨.ú
+   pn	   pn	   pn	   pn	   05”    Ûú
+    _	   pn	   ¨.ú
+   ¨.ú
+   °¿   ğóÎ   ğ\š   P6ú
+   à¿   ‘¿   ğÆú
+   °9ú
+   @‘¿    j	   €6ú
+    j	   ğÆú
+   p‘¿    ‘¿   °9ú
+   ¨.ú
+   ¨.ú
+   ÀÕÅ   PqÊ   ¨.ú
+   Ğ‘¿   °¬   @:ú
+   °¬   °¬   0ôÎ   ğ]š   P6ú
+   €6ú
+   ¨.ú
+   ğ]š   ğ]š   ğ]š   ğ]š    ’¿   0’¿   °¬   `’¿   °¬   °¬   ’¿   °9ú
+   ¨.ú
+   ¨.ú
+   À’¿    C   p7ú
+    C   ğ’¿    V	   P6ú
+   2Î   @4Î   €6ú
+   ¨.ú
+    C    C    C    C    V	    C   ¨.ú
+    “¿   °¬   °9ú
+   ¨.ú
+   ¨.ú
+   P“¿   °¬   p7ú
+   °¬   €“¿   ğÆú
+   p7ú
+   °“¿   8ğ
+   P6ú
+   à“¿   ğÆú
+   €6ú
+   ğÆú
+   ğÆú
+   ğÆú
+   ¨.ú
+   °¬   °¬   °¬   °¬   ğÆú
+   8ğ
+   ğÆú
+   °¬   ¨.ú
+   ”¿   ¨.ú
+   ¨.ú
+   @”¿   pôÎ   ğ‹   P6ú
+   p”¿   X¡ú
+   °9ú
+    ”¿   pŠ	   à?ú
+   Ğ”¿   °6m   p7ú
+    •¿   Ğæ™	   @@ú
+   °6m   °6m   @:ú
+   pŠ	   X¡ú
+   X¡ú
+   X¡ú
+   X¡ú
+   X¡ú
+   X¡ú
+   0•¿   7ú
+   €6ú
+   X¡ú
+   X¡ú
+   X¡ú
+   X¡ú
+   X¡ú
+   X¡ú
+   `•¿   •¿   H¥ú
+   à?ú
+   À•¿   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+   ğ•¿    j	   @@ú
+    j	    j	   °9ú
+   H¥ú
+   ¨.ú
+   ¨.ú
+   ÖÅ   `ÖÅ   ¨.ú
+    –¿   P–¿   X¡ú
+   €–¿   X¡ú
+   X¡ú
+   °–¿   °9ú
+   ¨.ú
+   ¨.ú
+   à–¿   Òú
+   @:ú
+   Òú
+   Òú
+   —¿   pn	   p7ú
+   0óÎ   ğ]š   P6ú
+   €6ú
+   ¨.ú
+   pn	   pn	   pn	   ğ]š   pn	   @—¿   àEú
+   p—¿    —¿   °9ú
+   Ğ—¿   Òú
+   7ú
+   Òú
+    ˜¿   póÎ   °9ú
+   0˜¿   pn	   p7ú
+   `˜¿   0¿b   p7ú
+   ˜¿   È³ú
+   P6ú
+   €6ú
+   7ú
+   pn	   À˜¿   ğ˜¿   °9ú
+    ™¿   pn	   p7ú
+   P™¿   €ºL   p7ú
+   €™¿   È³ú
+   P6ú
+   €6ú
+   7ú
+   pn	   °™¿   °óÎ   °9ú
+   à™¿   pn	   p7ú
+   š¿   0‹b   p7ú
+   @š¿   È³ú
+   P6ú
+   €6ú
+   7ú
+   pn	   pš¿    š¿   °9ú
+   Ğš¿   pn	   p7ú
+   põÎ   0½b   p7ú
+    ›¿   È³ú
+   P6ú
+   €6ú
+   7ú
+   pn	   0›¿   `›¿   °9ú
+   ›¿   pn	   p7ú
+   À›¿   0ªL   p7ú
+   ğ›¿   È³ú
+   P6ú
+   €6ú
+   7ú
+   pn	    œ¿   phË   °9ú
+   Pœ¿   p]š   p7ú
+   €œ¿   ptš   p7ú
+   °œ¿   È³ú
+   P6ú
+   €6ú
+   7ú
+   p]š   0hË   0fË   °9ú
+   àœ¿   p]š   p7ú
+   ğeË   °sš   p7ú
+   ¿   È³ú
+   P6ú
+   €6ú
+   7ú
+   p]š   @Fú
+   ¨.ú
+   ¨.ú
+   @¿   X¡ú
+    ô
+   @:ú
+    ô
+    ô
+   àEú
+   àBú
+   û
+   °9ú
+   û
+   p¿   X¡ú
+   p7ú
+    ¿   È³ú
+   P6ú
+   ğDú
+    û
+   €6ú
+    û
+    û
+    û
+   Ğ¿   X¡ú
+   û
+   àBú
+   û
+   7ú
+   û
+   ğDú
+    û
+    ¿    û
+   0¿   0àª   p7ú
+   `¿    ½ú
+   P6ú
+   €6ú
+   @Fú
+   0àª   ¨.ú
+   û
+   û
+   ¿   °hË   @:ú
+   °hË   °hË   À¿    ô
+   p7ú
+   ğ¿   &ğ
+   P6ú
+    Ÿ¿   °eË   7ú
+   PŸ¿   €6ú
+   ¨.ú
+    ô
+    ô
+    ô
+   &ğ
+    ô
+   €Ÿ¿    ô
+   à?ú
+    ô
+   °Ÿ¿   àŸ¿   @@ú
+   @:ú
+    ô
+    ¿   °hË   P6ú
+   €6ú
+   @ ¿   °hË   °hË   °hË   °hË   p ¿   °hË     ¿   °hË   Ğ ¿    ¡¿   0¡¿   `¡¿   ¨.ú
+   ¡¿   À¡¿    ô
+   ¨.ú
+    ô
+   ¨.ú
+   Ğ:ú
+   ğ¡¿   ğœ	   p7ú
+   ğœ	    ¢¿   p	   ¨.ú
+   ğœ	   P¢¿   €¢¿   0®   P6ú
+   °6ú
+   7ú
+   °¢¿   °¯   °9ú
+   à¢¿   pŠ	   à?ú
+   £¿   4ï
+   @@ú
+   4ï
+   4ï
+   @:ú
+   pŠ	   @£¿   7ú
+   p£¿   poî	   °9ú
+    £¿   pŠ	   à?ú
+   Ğ£¿   Ø—î
+   à?ú
+    ¤¿   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   Ø—î
+   Ø—î
+   @:ú
+   pŠ	   `¤¿   7ú
+   ¤¿   ğÆú
+   °9ú
+   À¤¿   pŠ	   à?ú
+   ğ¤¿   H¥ú
+   à?ú
+    ¥¿   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+   P¥¿    j	   @@ú
+    j	    j	   @@ú
+   H¥ú
+   H¥ú
+   @:ú
+   pŠ	   €¥¿   7ú
+   °¥¿   Òú
+   °9ú
+   à¥¿   pŠ	   à?ú
+   ¦¿   s	   à?ú
+   @¦¿   p]š   p7ú
+   p¦¿   Ğ×K   7ú
+   p]š   p]š   p]š    ¦¿   h*ï
+   7ú
+   h*ï
+   h*ï
+   Ğ¦¿   4ï
+   7ú
+   4ï
+   4ï
+    §¿    t	   à?ú
+   0§¿   @@ú
+   @@ú
+    t	    t	   @@ú
+   s	   s	   @:ú
+   pŠ	   `§¿   7ú
+   §¿   ÀC   °9ú
+   À§¿   pŠ	   à?ú
+   ğ§¿   s	   à?ú
+    ¨¿   à®ğ
+   7ú
+   à®ğ
+   à®ğ
+   à®ğ
+   P¨¿    t	   à?ú
+   €¨¿   °¨¿   @@ú
+   @@ú
+    t	    t	   @@ú
+   s	   s	   @:ú
+   pŠ	   à¨¿   7ú
+   ©¿   çr	   °9ú
+   @©¿   pŠ	   à?ú
+   p©¿   °ƒ™   p7ú
+    ©¿   PĞr	   @@ú
+   °ƒ™   °ƒ™   @:ú
+   pŠ	   Ğ©¿   7ú
+    ª¿   p„™   °9ú
+   0ª¿   pŠ	   à?ú
+   `ª¿   °+ï
+   à?ú
+   ª¿   °ib   @@ú
+   °ib   °ib   @@ú
+   °+ï
+   °+ï
+   @:ú
+   pŠ	   Àª¿   7ú
+   °fË   °.”   °9ú
+   ğª¿   pŠ	   à?ú
+    «¿   4ï
+   @@ú
+   4ï
+   4ï
+   @:ú
+   pŠ	   P«¿   7ú
+   €«¿   °«¿   À8ğ
+   °9ú
+   à«¿    j	   7ú
+    j	   €6ú
+   ¬¿   @¬¿   €(ï
+   à?ú
+   p¬¿   7ú
+    ¬¿   7ú
+   Ğ¬¿   @@ú
+   °9ú
+   €(ï
+   ¨.ú
+   ¨.ú
+    h‰@‹   .‰@‹  ¨.ú
+    ­¿   0­¿   À8ğ
+   °9ú
+   À8ğ
+   À8ğ
+   ¨.ú
+   ¨.ú
+   `­¿   hîú
+   p7ú
+   hîú
+   ­¿   Øğ
+   P6ú
+   À­¿   °ÖÅ    ×Å   àEú
+   ğ­¿   À8ğ
+   @Fú
+   À8ğ
+   p7ú
+    ùú
+   05ú
+   P×Å    ùú
+   7ú
+   ğfË   ‘ğ
+   7ú
+   ‘ğ
+   ‘ğ
+   €6ú
+   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+    ®¿   À8ğ
+   pŠ   @:ú
+   pŠ   pŠ   pfË   ğ‹   P6ú
+   €6ú
+   ¨.ú
+   ğ‹   ğ‹   ğ‹   ğ‹   P®¿   °d9   @:ú
+   °d9   °d9   P6ú
+   €®¿   °dË   P6ú
+   °dË   àEú
+   °®¿   à®¿   °9ú
+   ¯¿   Òú
+   @¯¿   Òú
+   p¯¿   À8ğ
+   p7ú
+    ¯¿   È³ú
+   P6ú
+   Ğ¯¿   pdË   €6ú
+   @Fú
+   À8ğ
+   €6ú
+    °¿   °dË   0°¿   Òú
+   `°¿   Òú
+   °¿   À°¿   ğ°¿    ±¿   €6ú
+   °dË   ¨.ú
+   °dË   °dË   °dË   °dË   °dË   °dË   °dË   0dË    ×Å   @:ú
+    ×Å    ×Å   peË   °.”   ¨.ú
+   °.”   °.”   °.”   P±¿   ğdË    ×Å   €±¿    ×Å    ×Å   °±¿   à±¿   ²¿   °d9   @²¿   °d9   p²¿    ²¿   °9ú
+   ¨.ú
+   ¨.ú
+   Ğ²¿   poî	   @:ú
+   poî	   poî	    ³¿   ¸ñ
+   P6ú
+   0³¿   0ï
+   P6ú
+   0ï
+   `³¿   poî	   ³¿   poî	   poî	   à?ú
+   @@ú
+   €6ú
+   poî	   Fú
+   0ï
+   À³¿   0ï
+   P6ú
+   ğ³¿   °d9   p7ú
+   °d9    ´¿   poî	   P´¿   °d9   à?ú
+   @@ú
+   €6ú
+   °d9   €6ú
+   0ï
+   0ï
+   ¨.ú
+   ¸ñ
+   ¸ñ
+   ¸ñ
+   0ï
+   ¸ñ
+   €´¿   ğÆú
+   @:ú
+   ğÆú
+   ğÆú
+   àEú
+   °´¿   à´¿   °d9   p7ú
+   µ¿   ğÆú
+   7ú
+   °d9   @µ¿   P6ú
+   pµ¿   ğÆú
+    µ¿   ğÆú
+   ğÆú
+   àEú
+   @Fú
+   €6ú
+   ğÆú
+   @Fú
+   ğÆú
+   ğÆú
+   ¨.ú
+   0cË    ×Å   @:ú
+    ×Å    ×Å   Ğµ¿   °d9   p7ú
+    ¶¿   0·ú
+   ğbË   °d9   0·ú
+   °d9   0·ú
+   °d9   ¨.ú
+   0¶¿    ×Å   ÀC   @:ú
+   ÀC   ÀC   `¶¿   ÀC   ¶¿   ÀC   ÀC   ÀC   À¶¿   ÀC   ğ¶¿   ÀC    ·¿   P·¿   €·¿   °·¿   pŠ   p7ú
+   à·¿   È³ú
+   P6ú
+   ¸¿   @¸¿   €6ú
+   ¨.ú
+   pŠ   °bË   pŒ   P6ú
+   pŒ   àEú
+   p¸¿    ¸¿   °9ú
+   Ğ¸¿   °d9   7ú
+   °d9    ¹¿   ğcË   °9ú
+   0¹¿   °¯   7ú
+   °¯   `¹¿   ¹¿   °9ú
+   À¹¿   poî	   7ú
+   poî	   ğ¹¿   °cË   °9ú
+    º¿   ğÆú
+   7ú
+   ğÆú
+   Pº¿   €º¿   °9ú
+   °º¿   ÀC   7ú
+   ÀC   àº¿   »¿   °9ú
+   @»¿   çr	   7ú
+   çr	   p»¿   °aË   °9ú
+    »¿   p„™   7ú
+   p„™   paË   0aË   °9ú
+   pbË    ×Å   7ú
+    ×Å   @Fú
+   €6ú
+   ¨.ú
+   pŒ   pŒ   pŒ   pŒ   pŒ   Ğ»¿   °9ú
+   ¨.ú
+   ¨.ú
+    ¼¿   ¨.ú
+   ¨.ú
+   0¼¿   °9ú
+   ¨.ú
+   ¨.ú
+   pcË   pŒ   P6ú
+   pŒ   `¼¿   pŠ   €6ú
+   pŠ   pŠ   pŠ   ¨.ú
+   pŒ   pŒ   pŒ   pŒ   pŠ   pŒ   ¨.ú
+   ¨.ú
+   0eË   0bË   @:ú
+   0bË   0bË   ğaË   ğ]š   ¨.ú
+   ğ]š   ğ]š   ğ]š   ¼¿   0`Ë   ğ_Ë   P6ú
+   À¼¿    ³ú
+   °9ú
+   ğ¼¿    j	   €6ú
+    j	    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ½¿   P½¿   °$	   à?ú
+   °_Ë   ğ`Ë   à?ú
+   Ğ=ú
+     û
+   7ú
+     û
+     û
+     û
+   0>ú
+   ` û
+   @@ú
+   ` û
+   ` û
+   @@ú
+   ğ`Ë   ğ`Ë   °9ú
+   °$	   ¨.ú
+   ¨.ú
+   pÊ   °qÊ   ¨.ú
+   €½¿   P6ú
+   °`Ë   p`Ë   P6ú
+   p`Ë   °½¿    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   à½¿   p`Ë   P6ú
+   ¾¿   ¼ú
+   P6ú
+   ¼ú
+   @¾¿    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+   p¾¿   pƒ	   p7ú
+   pƒ	    ¾¿   ÀL	   €6ú
+   pƒ	   Ğ¾¿   ¼ú
+   °^Ë   p`Ë   P6ú
+    ¿¿    ³ú
+   p7ú
+    ³ú
+   0¿¿    ³ú
+   €6ú
+    ³ú
+    ³ú
+   €6ú
+   p`Ë   ¼ú
+   `¿¿   ¼ú
+   ¼ú
+   P6ú
+   ¿¿   X\ï
+   P6ú
+   X\ï
+   À¿¿    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+   0@À   p^Ë   €6ú
+   `@À   X\ï
+   0^Ë   p`Ë   P6ú
+   @À    ³ú
+   p7ú
+    ³ú
+   À@À   èiú
+   €6ú
+    ³ú
+    ³ú
+   €6ú
+   p`Ë   X\ï
+   €6ú
+   X\ï
+   X\ï
+   p`Ë   ¨.ú
+   p`Ë   p`Ë   ¨.ú
+   ğ@À   ğ]Ë   °]Ë   P6ú
+    AÀ    ³ú
+   °9ú
+   PAÀ   È)ï
+   à?ú
+   Ğ=ú
+     û
+   7ú
+     û
+     û
+     û
+   0>ú
+   ` û
+   @@ú
+   ` û
+   ` û
+   7ú
+   È)ï
+   °6ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+   7ú
+   €AÀ   ÈÉú
+   °9ú
+   °AÀ   pŠ	   à?ú
+   àAÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @:ú
+   pŠ	   BÀ   7ú
+   @BÀ   ğÆú
+   °9ú
+   pBÀ   pŠ	   à?ú
+    BÀ   h*ï
+   à?ú
+   ĞBÀ   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+    CÀ    j	   @@ú
+    j	    j	   @@ú
+   h*ï
+   h*ï
+   @:ú
+   pŠ	   0CÀ   7ú
+   `CÀ   poî	   °9ú
+   CÀ   pŠ	   à?ú
+   ÀCÀ   Ø—î
+   à?ú
+   ğCÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   Ø—î
+   Ø—î
+   @:ú
+   pŠ	    DÀ   7ú
+   PDÀ   çr	   °9ú
+   €DÀ   pŠ	   à?ú
+   °DÀ   °ƒ™   p7ú
+   àDÀ   PĞr	   @@ú
+   °ƒ™   °ƒ™   @:ú
+   pŠ	   EÀ   7ú
+   @EÀ   ğ·Å   °9ú
+   pEÀ   pŠ	   à?ú
+    EÀ   È)ï
+   à?ú
+   à?ú
+   ĞEÀ   °+ï
+   @@ú
+   °+ï
+   °+ï
+   7ú
+   °+ï
+    FÀ   s	   à?ú
+   0FÀ   H¥ú
+   7ú
+   H¥ú
+   H¥ú
+   H¥ú
+   `FÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   s	   s	   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	   FÀ   7ú
+   ÀFÀ   °¯   °9ú
+   ğFÀ   pŠ	   à?ú
+    GÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @:ú
+   pŠ	   PGÀ   7ú
+   °GÀ   p¸Å   °9ú
+   àGÀ   pŠ	   à?ú
+   HÀ   È)ï
+   à?ú
+   à?ú
+   @HÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   7ú
+   H¥ú
+   pHÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	    HÀ   7ú
+   ĞHÀ   °¸Å   °9ú
+    IÀ   pŠ	   à?ú
+   0IÀ   È)ï
+   à?ú
+   `IÀ   7ú
+   IÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	   ÀIÀ   7ú
+   ğIÀ   ğ¸Å   °9ú
+    JÀ   pŠ	   à?ú
+   PJÀ   È)ï
+   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	   €JÀ   7ú
+   €6ú
+   °JÀ   0¸Å   ğ`Ë   à?ú
+   Ğ=ú
+     û
+   7ú
+     û
+     û
+     û
+   0>ú
+   ` û
+   @@ú
+   ` û
+   ` û
+   °9ú
+   ğ`Ë   ¨.ú
+   ¨.ú
+   ğ×Å   @ØÅ   ¨.ú
+   àJÀ   0¹Å   ğ_Ë   P6ú
+   ğ_Ë   KÀ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   °9ú
+   ğ_Ë   ¨.ú
+   ¨.ú
+   @KÀ   pKÀ    ³ú
+   ¨.ú
+    ³ú
+   ¨.ú
+    KÀ   ğ_Ë   ĞKÀ   °\š   P6ú
+    LÀ   ÈÉú
+   @:ú
+   ÈÉú
+   ÈÉú
+   ÈÉú
+   ÈÉú
+   0LÀ   ÈÉú
+   7ú
+   ÈÉú
+   `LÀ   ğÆú
+   @:ú
+   LÀ   ğÆú
+   7ú
+   ğÆú
+   ÀLÀ   poî	   @:ú
+   ğLÀ   poî	   7ú
+   poî	    MÀ   çr	   @:ú
+   PMÀ   çr	   7ú
+   çr	   €MÀ   ğ·Å   @:ú
+   °MÀ   ğ·Å   7ú
+   ğ·Å   àMÀ   °¯   @:ú
+   NÀ   °¯   7ú
+   °¯   @NÀ   p¸Å   @:ú
+   pNÀ   p¸Å   7ú
+   p¸Å    NÀ   °¸Å   @:ú
+   ĞNÀ   °¸Å   7ú
+   °¸Å    OÀ   ğ¸Å   @:ú
+   0OÀ   ğ¸Å   7ú
+   ğ¸Å   €6ú
+   ÈÉú
+   ğÆú
+   poî	   çr	   ğ·Å   °¯   p¸Å   °¸Å   ğ¸Å   P6ú
+   `OÀ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   ¨.ú
+   °\š   ¨.ú
+   OÀ   ÀOÀ   ğ'	   P6ú
+   ğOÀ    ³ú
+   °9ú
+    PÀ   È)ï
+   €6ú
+   È)ï
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+   €PÀ   °PÀ   à®ğ
+   °9ú
+   à®ğ
+   ¨.ú
+   ¨.ú
+   p6Î   à6Î   ¨.ú
+   àPÀ   QÀ   0äø   p7ú
+   p¹Å   ğ+	   P6ú
+   @QÀ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   pQÀ   0äø   P6ú
+    QÀ   X\ï
+   P6ú
+   X\ï
+   ĞQÀ    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+    RÀ   °¹Å   €6ú
+   0RÀ   X\ï
+   `RÀ   0äø   p7ú
+   ğ¹Å   ğ+	   P6ú
+   RÀ    ³ú
+   p7ú
+    ³ú
+   ÀRÀ   ğ–ï   €6ú
+    ³ú
+    ³ú
+   €6ú
+   0äø   X\ï
+   ¨.ú
+   X\ï
+   X\ï
+   ¨.ú
+   ğRÀ    SÀ   0ºÅ   P6ú
+   PSÀ   ğö	   7ú
+   ğö	   ğö	   €SÀ    y	   @:ú
+    y	    y	    y	   °SÀ   €6ú
+    y	   °9ú
+   ¨.ú
+   ¨.ú
+   P7Î   À7Î   ¨.ú
+   àSÀ   ÈÉú
+   °9ú
+   TÀ   pŠ	   à?ú
+   @TÀ   4ï
+   @@ú
+   4ï
+   4ï
+   ¨.ú
+   pŠ	   ØÅ   àØÅ   ¨.ú
+   pºÅ   p$”   °9ú
+   pTÀ   pŠ	   à?ú
+    TÀ   °ƒ™   p7ú
+   ĞTÀ   ùK   @@ú
+   °ƒ™   °ƒ™   ¨.ú
+   pŠ	   0ÙÅ   €ÙÅ   ¨.ú
+    UÀ   0îÚ   °9ú
+   0UÀ   pŠ	   à?ú
+   `UÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   ¨.ú
+   pŠ	   ĞÙÅ    ÚÅ   ¨.ú
+   UÀ   Òú
+   °9ú
+   ÀUÀ   pŠ	   à?ú
+   ğUÀ   s	   à?ú
+    VÀ   p]š   p7ú
+   PVÀ   Ğ×K   7ú
+   p]š   p]š   p]š   €VÀ   4ï
+   7ú
+   4ï
+   4ï
+   °VÀ   h*ï
+   @@ú
+   h*ï
+   h*ï
+   @@ú
+   s	   s	   ¨.ú
+   pŠ	   08Î    8Î   ¨.ú
+   àVÀ   °¬   °9ú
+   WÀ   pŠ	   à?ú
+   @WÀ   p]š   p7ú
+   pWÀ   Ğ×K   @@ú
+   p]š   p]š   °ºÅ   pŠ	   pÚÅ   ÀÚÅ   ¨.ú
+    WÀ   °¯   °9ú
+   ĞWÀ   pŠ	   à?ú
+    XÀ   4ï
+   @@ú
+   4ï
+   4ï
+   ¨.ú
+   pŠ	   ÛÅ   `ÛÅ   ¨.ú
+   0XÀ   ğÆú
+   °9ú
+   `XÀ   pŠ	   à?ú
+   XÀ   H¥ú
+   à?ú
+   ÀXÀ   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+   ğXÀ    j	   @@ú
+    j	    j	   @@ú
+   H¥ú
+   H¥ú
+   ¨.ú
+   pŠ	   °ÛÅ    ÜÅ   ¨.ú
+    YÀ   poî	   °9ú
+   PYÀ   pŠ	   à?ú
+   €YÀ   Ø—î
+   à?ú
+   àYÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   Ø—î
+   Ø—î
+   ¨.ú
+   pŠ	   PÜÅ    ÜÅ   ¨.ú
+   ZÀ   `O   °9ú
+   @ZÀ   pŠ	   à?ú
+   pZÀ   °ƒ™   p7ú
+    ZÀ   ùK   @@ú
+   °ƒ™   °ƒ™   ¨.ú
+   pŠ	   ğºÅ   ğÜÅ   ¨.ú
+   ĞZÀ   çr	   °9ú
+    [À   pŠ	   à?ú
+   0[À   °ƒ™   p7ú
+   `[À   PĞr	   @@ú
+   °ƒ™   °ƒ™   ¨.ú
+   pŠ	   @İÅ   İÅ   ¨.ú
+   [À   0»Å   °9ú
+   À[À   pŠ	   à?ú
+   ğ[À   È)ï
+   à?ú
+   à?ú
+    \À   p]š   p7ú
+   p]š   P\À   Ğ×K   @@ú
+   p]š   7ú
+   p]š   €\À   @@ú
+   @@ú
+   È)ï
+   È)ï
+   ¨.ú
+   pŠ	   °\À   ĞéY   °9ú
+   à\À   pŠ	   à?ú
+   ]À   È)ï
+   à?ú
+   à?ú
+   @]À   p]š   p7ú
+   p]š   p]À   Ğ×K   @@ú
+   p]š   7ú
+   p]š    ]À    j	   @@ú
+    j	    j	   @@ú
+   È)ï
+   È)ï
+   ¨.ú
+   pŠ	   9Î   €9Î   ¨.ú
+   ¨.ú
+   0>ú
+   ` û
+   @:ú
+   ` û
+   ` û
+   Ğ]À   PÊ		   P6ú
+    ^À   ` û
+   7ú
+   0^À   °¢ú
+   @:ú
+   °¢ú
+   °¢ú
+   °¢ú
+   `^À   €6ú
+   °¢ú
+   ¨.ú
+   PÊ		   PÊ		   PÊ		   PÊ		   Ğ=ú
+     û
+   @:ú
+     û
+     û
+   ^À   H•õ
+   P6ú
+   À^À     û
+   €6ú
+   ¨.ú
+   H•õ
+   H•õ
+   H•õ
+   H•õ
+   Ğ:ú
+   p»Å   0%	   ¨.ú
+   0%	   0%	   ğ^À   0%	   °»Å   ğ`Ë   P6ú
+    _À   0Š	   7ú
+   0Š	   0Š	   P_À   0ğ		   à?ú
+   0ğ		   Ğ=ú
+     û
+   7ú
+     û
+     û
+     û
+   0>ú
+   ` û
+   @@ú
+   ` û
+   ` û
+   €6ú
+   0ğ		   °9ú
+   ¨.ú
+   ¨.ú
+   0¯Ç   0¬Ç   ¨.ú
+   €_À   °_À   èiú
+   P6ú
+   à_À   @İú
+   7ú
+   °6ú
+   @İú
+   @İú
+   @İú
+   @İú
+   `À    “ú
+   °9ú
+   Ğ=ú
+     û
+   p7ú
+   @`À    “ú
+   7ú
+     û
+   p`À   ğ»Å   °9ú
+    `À   pŠ	   à?ú
+   Ğ`À   0ºÅ   @@ú
+   0ºÅ   0ºÅ   @:ú
+   pŠ	    aÀ   7ú
+   0aÀ   `aÀ   À8ğ
+   °9ú
+   Ğ=ú
+     û
+   p7ú
+   aÀ   À8ğ
+   7ú
+     û
+   €6ú
+   ÀaÀ   0>ú
+   ` û
+   °9ú
+   ` û
+   ¨.ú
+   ¨.ú
+   p7½   9½   ¨.ú
+   ğaÀ   ¨.ú
+   ¨.ú
+   ¨.ú
+    bÀ   PbÀ   0¼Å   P6ú
+   °6ú
+   7ú
+   €bÀ   °¬   °9ú
+   °bÀ   p]š   p7ú
+   àbÀ   Ğ×K   7ú
+   p]š   cÀ    W   °9ú
+   @cÀ   pŠ	   à?ú
+   pcÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @:ú
+   pŠ	    cÀ   7ú
+   ĞcÀ    dÀ   À8ğ
+   °9ú
+   0dÀ    j	   7ú
+    j	   €6ú
+   `dÀ   dÀ   pŠ	   à?ú
+   ÀdÀ   €ß   p7ú
+   p¼Å   ğ‰b   @@ú
+   €ß   €ß   °9ú
+   pŠ	   ¨.ú
+   ¨.ú
+   ğdÀ   °¼Å   @:ú
+   °¼Å   °¼Å   P6ú
+    eÀ   °¬   p7ú
+   °¬   PeÀ   ğÆú
+   €eÀ   °¬   àEú
+   @Fú
+   €6ú
+   °¬   p7ú
+   °eÀ   È³ú
+   P6ú
+   ğ¼Å   0½Å   €6ú
+   ¨.ú
+   °¬   °¬   °¬   ğÆú
+   °¬   ğÆú
+   °¬   °¬   È³ú
+   °¬   °¬   àeÀ   P6ú
+   fÀ    W   @fÀ    W    W   àEú
+   @Fú
+   €6ú
+    W   p7ú
+   pfÀ   È³ú
+   P6ú
+   p½Å   °½Å   €6ú
+    fÀ    W    W   ĞfÀ   °¼Å   ¨.ú
+   °¼Å   ¨.ú
+   Ğ:ú
+    gÀ   ğ%	   ¨.ú
+   ğ%	   ğ%	   0gÀ   `gÀ   °\š   P6ú
+   gÀ    ³ú
+   °9ú
+   ÀgÀ   È)ï
+   à?ú
+   Ğ=ú
+     û
+   7ú
+     û
+     û
+     û
+   0>ú
+   ` û
+   @@ú
+   ` û
+   ` û
+   7ú
+   È)ï
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+   ğgÀ   ğ½Å   ğ`Ë   à?ú
+   Ğ=ú
+     û
+   7ú
+     û
+     û
+     û
+   0>ú
+   ` û
+   @@ú
+   ` û
+   ` û
+   °9ú
+   ğ`Ë    hÀ   ¨.ú
+   Ğ:ú
+   PhÀ   ğ%	   ¨.ú
+   ğ%	   ğ%	   €hÀ   °hÀ   °\š   P6ú
+   àhÀ   pwb   °9ú
+   iÀ   °ƒ™   p7ú
+   @iÀ   ğj^   @:ú
+   °ƒ™   pwb   pwb   pwb   pwb   pwb   pwb   piÀ    iÀ   7ú
+   °6ú
+   pwb   pwb   pwb   pwb   pwb   pwb   7ú
+   ĞiÀ   ÈÉú
+   °9ú
+    jÀ   pŠ	   à?ú
+   0jÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @:ú
+   pŠ	   `jÀ   7ú
+   jÀ   ğÆú
+   °9ú
+   ÀjÀ   pŠ	   à?ú
+   ğjÀ   h*ï
+   à?ú
+    kÀ   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+   PkÀ    j	   @@ú
+    j	    j	   @@ú
+   h*ï
+   h*ï
+   @:ú
+   pŠ	   €kÀ   7ú
+   °kÀ   poî	   °9ú
+   àkÀ   pŠ	   à?ú
+   lÀ   Ø—î
+   à?ú
+   @lÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   Ø—î
+   Ø—î
+   @:ú
+   pŠ	   plÀ   7ú
+    lÀ   çr	   °9ú
+   ĞlÀ   pŠ	   à?ú
+    mÀ   °ƒ™   p7ú
+   0mÀ   PĞr	   @@ú
+   °ƒ™   °ƒ™   @:ú
+   pŠ	   `mÀ   7ú
+   mÀ   ğ·Å   °9ú
+   ÀmÀ   pŠ	   à?ú
+   ğmÀ   È)ï
+   à?ú
+   à?ú
+    nÀ   °+ï
+   @@ú
+   °+ï
+   °+ï
+   7ú
+   °+ï
+   PnÀ   s	   à?ú
+   €nÀ   H¥ú
+   7ú
+   H¥ú
+   H¥ú
+   H¥ú
+   °nÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   s	   s	   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	   ànÀ   7ú
+   oÀ   °¯   °9ú
+   @oÀ   pŠ	   à?ú
+   poÀ   4ï
+   @@ú
+   4ï
+   4ï
+   @:ú
+   pŠ	    oÀ   7ú
+   ĞoÀ   p¸Å   °9ú
+    pÀ   pŠ	   à?ú
+   0pÀ   È)ï
+   à?ú
+   à?ú
+   `pÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   7ú
+   H¥ú
+   pÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	   ÀpÀ   7ú
+   ğpÀ   °¸Å   °9ú
+    qÀ   pŠ	   à?ú
+   PqÀ   È)ï
+   à?ú
+   €qÀ   7ú
+   °qÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	   àqÀ   7ú
+   rÀ   ğ¸Å   °9ú
+   @rÀ   pŠ	   à?ú
+   prÀ   È)ï
+   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	    rÀ   7ú
+   p¾Å   0¾Å   °9ú
+   ĞrÀ   pŠ	   à?ú
+    sÀ   È)ï
+   à?ú
+   à?ú
+   0sÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   7ú
+   H¥ú
+   `sÀ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	   sÀ   7ú
+   °¾Å   °—   °9ú
+   ÀsÀ   à®ğ
+   @:ú
+   à®ğ
+   ğsÀ   7ú
+    tÀ   ÀC   °9ú
+   PtÀ   pŠ	   à?ú
+   €tÀ   à®ğ
+   @@ú
+   à®ğ
+   à®ğ
+   @:ú
+   pŠ	   °tÀ   7ú
+   ğ¾Å   °tb   °9ú
+   àtÀ   pŠ	   à?ú
+   uÀ   Ø¶î
+   à?ú
+   @uÀ   àëú
+   à?ú
+   puÀ   ğù   @@ú
+   ğù   ğù   7ú
+   àëú
+   àëú
+   àëú
+    uÀ   @@ú
+   @@ú
+   Ø¶î
+   Ø¶î
+   @:ú
+   pŠ	   ĞuÀ   7ú
+   €6ú
+    vÀ   0vÀ   È)ï
+   à?ú
+   à?ú
+   `vÀ   È)ï
+   à?ú
+   È)ï
+   Ğ=ú
+     û
+   7ú
+     û
+     û
+     û
+   0>ú
+   ` û
+   @@ú
+   ` û
+   ` û
+   @@ú
+   È)ï
+   7ú
+   È)ï
+   0¿Å   ğ`Ë   à?ú
+   Ğ=ú
+     û
+   7ú
+     û
+     û
+     û
+   0>ú
+   ` û
+   @@ú
+   ` û
+   ` û
+   @@ú
+   ğ`Ë   ğ`Ë   °9ú
+   È)ï
+   vÀ   ¨.ú
+   ÀvÀ   ğvÀ   °\š   P6ú
+   °6ú
+    wÀ    “ú
+   °9ú
+   PwÀ    j	   7ú
+    j	   €wÀ   °wÀ   À8ğ
+   °9ú
+   àwÀ    j	   7ú
+    j	   €6ú
+   xÀ   @xÀ   s	   à?ú
+   pxÀ   È)ï
+   7ú
+   È)ï
+   È)ï
+   È)ï
+    xÀ   È)ï
+   à?ú
+   à?ú
+   ĞxÀ   È)ï
+   @@ú
+   È)ï
+   È)ï
+   7ú
+   È)ï
+    yÀ   È)ï
+   @@ú
+   È)ï
+   È)ï
+   @@ú
+   È)ï
+   È)ï
+   °9ú
+   s	   ¨.ú
+   ¨.ú
+    Ä@‹   ÀÂ@‹  ¨.ú
+   0yÀ   pwb   @:ú
+   pwb   pwb   `yÀ    ğ   P6ú
+   yÀ   °ƒ™   p7ú
+   °ƒ™   ÀyÀ   ğj^   7ú
+   °ƒ™   °ƒ™   P6ú
+   ğyÀ    “ú
+   à?ú
+    “ú
+   Ğ7ú
+   ˆú
+   @@ú
+   ˆú
+    zÀ    “ú
+   PzÀ    “ú
+   €zÀ    “ú
+   °zÀ   ¼ú
+   P6ú
+   àzÀ    “ú
+   à?ú
+    “ú
+   Ğ7ú
+   ˆú
+   @@ú
+   ˆú
+   7ú
+    “ú
+    “ú
+   {À   4ï
+   €6ú
+   4ï
+   4ï
+   @{À   ¼ú
+   P6ú
+   p{À   À8ğ
+   p7ú
+   À8ğ
+    {À   &ğ
+   P6ú
+   Ğ{À   p¿Å   7ú
+    |À   €6ú
+   0|À   À8ğ
+   `|À   |À   €6ú
+   À8ğ
+   €6ú
+   À8ğ
+   À8ğ
+    “ú
+   7ú
+    “ú
+    “ú
+   €6ú
+   ¨.ú
+    ğ    ğ    ğ   °ƒ™    ğ   À|À   ğ|À   pwb    }À   pwb   pwb   P}À   °¿Å   0@Å   °9ú
+   0@Å   ¨.ú
+   ¨.ú
+   €}À   hîú
+   p7ú
+   hîú
+   °}À   Øğ
+   P6ú
+   à}À   p@Å   °@Å   àEú
+   ~À   pwb   @Fú
+   pwb   ğ@Å   0AÅ   àEú
+   pAÅ   0@Å   @Fú
+   0@Å   p7ú
+    ùú
+   05ú
+   °AÅ   ğAÅ    ùú
+   @~À   0BÅ   àİÅ   àEú
+   p~À   pwb   @Fú
+   pwb    ~À   Ğ~À   05ú
+   0ŞÅ    À   €6ú
+   €ŞÅ   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+   0À   pwb   `À   ¸Áú
+   P6ú
+   ¸Áú
+   À    “ú
+   €6ú
+    “ú
+    “ú
+    “ú
+   p:ú
+   ¸Áú
+    8ú
+   ¨ú
+   °9ú
+   ¨ú
+   ¨.ú
+   ¨.ú
+   ÀÀ   hîú
+   p7ú
+   hîú
+   0€À   Øğ
+   P6ú
+   ğ9Î   `:Î   Ğ:Î   @;Î   pBÅ   °BÅ   €6ú
+   àìÄ   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+   `€À   ¸Áú
+   €À   À€À   ğ€À    À   À8ğ
+   °9ú
+   À8ğ
+   ¨.ú
+   ¨.ú
+   PÀ   hîú
+   p7ú
+   hîú
+   €À   Øğ
+   P6ú
+   °;Î    <Î   °À   ğBÅ   7ú
+   0°Ç   0CÅ   ‘ğ
+   7ú
+   ‘ğ
+   ‘ğ
+   €6ú
+   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+   àÀ   ğ·Å   @:ú
+   ğ·Å   ğ·Å   ‚À   À8ğ
+   p7ú
+   p‚À   &ğ
+   P6ú
+    ‚À   °CÅ   7ú
+   Ğ‚À   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+    ƒÀ   ÀC   @:ú
+   ÀC   ÀC   0ƒÀ   À8ğ
+   p7ú
+   `ƒÀ   &ğ
+   P6ú
+   ƒÀ   ÀƒÀ   7ú
+   ğƒÀ   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+    „À   ğCÅ   @:ú
+   ğCÅ   ğCÅ   P„À   0DÅ   P6ú
+   €„À   pDÅ   @:ú
+   pDÅ   pDÅ   pDÅ   pDÅ   °„À   À8ğ
+   p7ú
+   à„À   &ğ
+   P6ú
+   @…À   p…À   7ú
+    …À   €6ú
+   7ú
+   À8ğ
+   Ğ…À   ÈÉú
+   @:ú
+    †À   À8ğ
+   p7ú
+   0†À   &ğ
+   P6ú
+   `†À   †À   7ú
+   À†À   €6ú
+   7ú
+   À8ğ
+   ğ†À   ğÆú
+   @:ú
+    ‡À   À8ğ
+   p7ú
+   P‡À   &ğ
+   P6ú
+   €‡À   °DÅ   7ú
+   °‡À   €6ú
+   7ú
+   À8ğ
+   à‡À   poî	   @:ú
+   ˆÀ   À8ğ
+   p7ú
+   @ˆÀ   &ğ
+   P6ú
+   pˆÀ    ˆÀ   7ú
+   ĞˆÀ   €6ú
+   7ú
+   À8ğ
+    ‰À   çr	   @:ú
+   0‰À   À8ğ
+   p7ú
+   `‰À   &ğ
+   P6ú
+   ‰À   À‰À   7ú
+   ğ‰À   €6ú
+   7ú
+   À8ğ
+    ŠÀ   °¯   @:ú
+   PŠÀ   À8ğ
+   p7ú
+   €ŠÀ   &ğ
+   P6ú
+   °ŠÀ   ğDÅ   7ú
+   àŠÀ   €6ú
+   7ú
+   À8ğ
+   ‹À   pwb   @:ú
+   @‹À   pwb   7ú
+   pwb   p‹À   p¸Å   @:ú
+    ‹À   À8ğ
+   p7ú
+   Ğ‹À   &ğ
+   P6ú
+   pEÅ   °EÅ   7ú
+    ŒÀ   €6ú
+   7ú
+   À8ğ
+   0ŒÀ   ğ¸Å   @:ú
+   `ŒÀ   À8ğ
+   p7ú
+   ŒÀ   &ğ
+   P6ú
+   ÀŒÀ   ğEÅ   7ú
+   ğŒÀ   €6ú
+   7ú
+   À8ğ
+   0FÅ   pFÅ   @:ú
+    À   À8ğ
+   p7ú
+   PÀ   &ğ
+   P6ú
+   °FÅ   ğFÅ   7ú
+   €À   €6ú
+   7ú
+   À8ğ
+   0EÅ   °—   @:ú
+   °À   À8ğ
+   p7ú
+   àÀ   &ğ
+   P6ú
+   0IÓ   ĞŞÅ   7ú
+   À   €6ú
+   7ú
+   À8ğ
+   @À   ÀC   @:ú
+   pÀ   ÀC   7ú
+   ÀC   pIÓ   °tb   @:ú
+    À   À8ğ
+   p7ú
+   ĞÀ   &ğ
+   P6ú
+   °IÓ   ğIÓ   7ú
+    À   €6ú
+   7ú
+   À8ğ
+   €6ú
+   pDÅ   ÈÉú
+   ğÆú
+   poî	   çr	   °¯   pwb   p¸Å   ğ¸Å   pFÅ   °—   ÀC   °tb   ¨.ú
+   0DÅ   0DÅ   0DÅ   pDÅ   0DÅ   0JÓ   pJÓ   @:ú
+   pJÓ   pJÓ   0À   À8ğ
+   p7ú
+   `À   &ğ
+   P6ú
+   °JÓ   ğJÓ   7ú
+   À   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+   ÀÀ   pCÅ   @:ú
+   pCÅ   pCÅ   ğÀ   pƒ	   p7ú
+    À   ÀL	   P6ú
+   0KÓ   pKÓ   7ú
+   pKÓ   pKÓ   pKÓ   °KÓ   pJÓ   @:ú
+   pJÓ   pJÓ   pJÓ   ğKÓ   pJÓ   7ú
+   pJÓ   €6ú
+   pJÓ   ¨.ú
+   pƒ	   pƒ	   pƒ	   ÀL	   pKÓ   pƒ	   PÀ   €À   À8ğ
+   °9ú
+   À8ğ
+   À8ğ
+   ¨.ú
+   ¨.ú
+   °À   hîú
+   p7ú
+   hîú
+   àÀ   Øğ
+   P6ú
+   ‘À   <Î   0¶Ç   05ú
+   0·Ç   @‘À   àEú
+   p‘À   ¸ñ
+   P6ú
+    ‘À   À8ğ
+   p7ú
+   À8ğ
+   Ğ‘À   è¾ú
+   P6ú
+   €6ú
+   €6ú
+   À8ğ
+   À8ğ
+   @Fú
+   ¸ñ
+   p7ú
+    ùú
+   05ú
+    ùú
+   7ú
+   0LÓ   ‘ğ
+   7ú
+   ‘ğ
+   ‘ğ
+   €6ú
+   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+    ’À   À8ğ
+   0’À   °	   P6ú
+   `’À    ³ú
+   °9ú
+   ’À   È)ï
+   €6ú
+   È)ï
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+   °9ú
+   ¨.ú
+   ¨.ú
+   À’À   pLÓ   @:ú
+   pLÓ   pLÓ   ğ’À   0äø   p7ú
+    “À   p[,	   P6ú
+   P“À    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   ¨.ú
+   0äø   0äø   0äø   p[,	    ³ú
+   0äø   °LÓ   ğLÓ   @:ú
+   ğLÓ   ğLÓ   €“À   pLÓ   p7ú
+   °“À   ğ!	   p7ú
+   à“À   È³ú
+   P6ú
+   ”À   0MÓ   7ú
+   @”À   €6ú
+   p”À   pLÓ   pLÓ   pLÓ   ğ!	   È³ú
+   pLÓ    ”À   Ğ”À   ¨.ú
+   pMÓ   °MÓ   @:ú
+   °MÓ   °MÓ    •À   pLÓ   p7ú
+   0•À   ğ!	   p7ú
+   `•À   È³ú
+   P6ú
+   •À   À•À   7ú
+   ğ•À   €6ú
+    –À   pLÓ   pLÓ   pLÓ   ğ!	   È³ú
+   pLÓ   P–À   €–À   ¨.ú
+   Ğ:ú
+   °–À   pƒ	   p7ú
+   pƒ	   à–À   `[	   P6ú
+   —À    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   ¨.ú
+   pƒ	   @—À   p—À    —À   0   P6ú
+   °6ú
+   Ğ—À    “ú
+   °9ú
+    ˜À    j	   7ú
+    j	   0˜À   ğ»Å   °9ú
+   `˜À   pŠ	   à?ú
+   ˜À   0ºÅ   @@ú
+   0ºÅ   0ºÅ   @:ú
+   pŠ	   À˜À   7ú
+   ğ˜À    ™À   À8ğ
+   °9ú
+   P™À    j	   7ú
+    j	   €6ú
+   €™À   °™À    j	   °9ú
+    j	   ¨.ú
+   ¨.ú
+    ßÅ   pßÅ   ¨.ú
+   à™À   šÀ   ğMÓ   °MÓ   °9ú
+   °MÓ   ¨.ú
+   ¨.ú
+   @šÀ   À8ğ
+   p7ú
+   À8ğ
+   pšÀ   &ğ
+   P6ú
+    šÀ   ĞšÀ   7ú
+    ›À   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+   ¨.ú
+   0›À   0NÓ   @:ú
+   0NÓ   0NÓ   `›À   ›À   ğÚª   p7ú
+   À›À   pNÓ   P6ú
+   ğ›À   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m    œÀ   °NÓ   7ú
+   °NÓ   °NÓ   PœÀ    ³ú
+   7ú
+    ³ú
+    ³ú
+   €œÀ   ğCÅ   @:ú
+   ğCÅ   ğCÅ   ğCÅ   °œÀ   ğCÅ   7ú
+   ğCÅ   àœÀ   ğ»Å   @:ú
+   À   ğ»Å   7ú
+   ğ»Å   @À    “ú
+   @:ú
+   pÀ    “ú
+   7ú
+    “ú
+    À   À8ğ
+   @:ú
+   ĞÀ   À8ğ
+   7ú
+   À8ğ
+   €6ú
+   ğCÅ   ğ»Å    “ú
+   À8ğ
+   ¨.ú
+   ğÚª    À   °9ú
+   ¨.ú
+   ¨.ú
+   0À   °ˆK   @:ú
+   °ˆK   °ˆK   `À   ğÚª   p7ú
+   ğNÓ   ğ‘K   P6ú
+   €6ú
+   ¨.ú
+   ğÚª   ğÚª   ğÚª   ğ‘K   ğÚª   À   0OÓ   ğLÓ   °9ú
+   ğLÓ   ğLÓ   ¨.ú
+   ¨.ú
+   ÀÀ   À8ğ
+   à?ú
+   À8ğ
+   ğÀ   pOÓ   @@ú
+   @:ú
+   À8ğ
+    ŸÀ   0NÓ   à?ú
+   PŸÀ   €ŸÀ   @@ú
+   ¨.ú
+   0NÓ   0NÓ   0NÓ   ¨.ú
+   °OÓ   ğLÓ   ğOÓ   @:ú
+   ğOÓ   ğOÓ   0PÓ   ÀßÅ   P6ú
+   °ŸÀ   0NÓ   à?ú
+   0NÓ   àŸÀ    À   @@ú
+   €6ú
+   0NÓ   0NÓ   ¨.ú
+   ÀßÅ   ÀßÅ   ÀßÅ   0NÓ   ÀßÅ   @ À   pPÓ   @:ú
+   pPÓ   pPÓ   p À   °ˆK     À   °ˆK   °ˆK   °ˆK   Ğ À   °PÓ    ÕÅ   P6ú
+   €6ú
+   ¨.ú
+    ÕÅ    ¡À   ğPÓ   ğOÓ   °9ú
+   ğOÓ   ğOÓ   ¨.ú
+   ¨.ú
+   0¡À   `¡À   0QÓ   pQÓ   P6ú
+   €6ú
+   °9ú
+   ¨.ú
+   ¨.ú
+   ¡À   °QÓ   ğOÓ   °9ú
+   ğOÓ   ¨.ú
+   ¨.ú
+   À¡À   ğ¡À    ¢À    ³ú
+   P6ú
+   °6ú
+   P¢À    “ú
+   7ú
+    “ú
+   €¢À   °¢À   À8ğ
+   €6ú
+   À8ğ
+   ¨.ú
+    ³ú
+   ¨.ú
+   ¨.ú
+   à¢À   £À   pPÓ   °9ú
+   pPÓ   pPÓ   ¨.ú
+   ¨.ú
+   @£À   ğQÓ   @:ú
+   ğQÓ   ğQÓ   p£À    £À   `¤V	   p7ú
+   Ğ£À   p%c   P6ú
+   0RÓ   pQÓ   P6ú
+   pQÓ   €6ú
+   7ú
+   pQÓ   pQÓ    ¤À   X¡ú
+   @:ú
+   X¡ú
+   X¡ú
+   X¡ú
+   0¤À   0NÓ   à?ú
+   `¤À   ¤À   @@ú
+   €6ú
+   0NÓ   X¡ú
+   ¨.ú
+   `¤V	   ¨.ú
+   À¤À   pPÓ   °9ú
+   ¨.ú
+   ¨.ú
+   ğ¤À    ¥À   0®   P6ú
+   P¥À   pRÓ   ğ‹   P6ú
+   €¥À   0NÓ   à?ú
+   0NÓ   °¥À   à¥À   @@ú
+   €6ú
+   0NÓ   0NÓ   €6ú
+   ğ‹   °9ú
+   0®   ¨.ú
+   ¨.ú
+   ¦À   ğQÓ   @:ú
+   ğQÓ   ğQÓ   @¦À   °RÓ   pQÓ   P6ú
+   €6ú
+   ¨.ú
+   pQÓ   ¨.ú
+   ¨.ú
+   ¨.ú
+   p¦À   ğOÓ   °9ú
+   ¨.ú
+   ¨.ú
+    ¦À   Ğ¦À   @:ú
+   Ğ¦À   Ğ¦À    §À    ³ú
+   P6ú
+   °6ú
+   0§À    “ú
+   7ú
+    “ú
+   `§À   §À   À8ğ
+   €6ú
+   À8ğ
+   ¨.ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+   À§À   ğ§À   pPÓ   °9ú
+   pPÓ   pPÓ   ¨.ú
+   ¨.ú
+    ¨À   ğQÓ   @:ú
+   ğQÓ   ğQÓ   P¨À   €¨À   `¤V	   p7ú
+   °¨À   p%c   P6ú
+   à¨À   Ğ¦À   7ú
+   Ğ¦À   Ğ¦À   Ğ¦À   ©À   X¡ú
+   @:ú
+   X¡ú
+   X¡ú
+   X¡ú
+   @©À   0NÓ   à?ú
+   p©À    ©À   @@ú
+   €6ú
+   0NÓ   X¡ú
+   ¨.ú
+   `¤V	   ¨.ú
+   Ğ©À   pPÓ   °9ú
+   ¨.ú
+   ¨.ú
+    ªÀ   0ªÀ   0®   P6ú
+   `ªÀ   ğRÓ   ğ‹   P6ú
+   ªÀ   0NÓ   à?ú
+   0NÓ   ÀªÀ   ğªÀ   @@ú
+   €6ú
+   0NÓ   0NÓ   €6ú
+   ğ‹   °9ú
+   0®   ¨.ú
+   ¨.ú
+    «À   ğQÓ   @:ú
+   ğQÓ   ğQÓ   P«À   €«À   Ğ¦À   ¨.ú
+   Ğ¦À   ¨.ú
+   ¨.ú
+   ¨.ú
+   ¨.ú
+   °«À   à«À   ğù   ¬À   ğù   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+   0SÓ   pSÓ   P6ú
+   pSÓ   ÀAú
+   ğû
+   €6ú
+   ğû
+   ğû
+   ğû
+   ¨.ú
+   pSÓ   pSÓ   pSÓ   pSÓ   ğû
+   pSÓ   @¬À   p¬À   `¤V	   p7ú
+    ¬À    ãK   P6ú
+   Ğ¬À   ğÚª   p7ú
+   ğÚª    ­À   pNÓ   P6ú
+   0­À   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m   `­À   pCÅ   7ú
+   pCÅ   pCÅ   ­À   0NÓ   7ú
+   0NÓ   0NÓ   À­À   pØ÷
+   @:ú
+   pØ÷
+   pØ÷
+   pØ÷
+   ÀAú
+   ğû
+   €6ú
+   ğû
+   pØ÷
+   €6ú
+   ğÚª   ğÚª   ¨.ú
+   `¤V	   ğ­À   ¨.ú
+   ¨.ú
+    ®À   P®À   ğÚª   p7ú
+   €®À   pNÓ   P6ú
+   °®À   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m   à®À   pCÅ   7ú
+   pCÅ   pCÅ   ¯À   0NÓ   7ú
+   0NÓ   0NÓ   @¯À    W   @:ú
+    W    W    W   p¯À   ğQÓ   €6ú
+   ğQÓ    W   ¨.ú
+   ğÚª    ¯À   Ğ¯À   ğQÓ   ¨.ú
+   ğQÓ   ¨.ú
+   Ğ:ú
+    °À   pƒ	   p7ú
+   pƒ	   0°À   `[	   P6ú
+   `°À    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   ¨.ú
+   pƒ	   °À   À°À   °SÓ   ğSÓ   P6ú
+   °6ú
+   ğ°À    “ú
+   °9ú
+    ±À    j	   7ú
+    j	   P±À   ğ»Å   °9ú
+   €±À   pŠ	   à?ú
+   °±À   0ºÅ   @@ú
+   0ºÅ   0ºÅ   @:ú
+   pŠ	   à±À   7ú
+   ²À   @²À   À8ğ
+   °9ú
+   p²À    j	   €6ú
+    j	   À8ğ
+    ²À   Ğ²À    'ï
+   °9ú
+    'ï
+   ¨.ú
+   ¨.ú
+    ³À   0³À   0TÓ   °MÓ   °9ú
+   °MÓ   ¨.ú
+   ¨.ú
+   `³À   À8ğ
+   p7ú
+   À8ğ
+   ³À   &ğ
+   P6ú
+   À³À   ğ³À   7ú
+    ´À   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+   ¨.ú
+   P´À   0NÓ   @:ú
+   0NÓ   0NÓ   €´À   °´À   ğÚª   p7ú
+   à´À   pNÓ   P6ú
+   µÀ   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m   @µÀ   °NÓ   7ú
+   °NÓ   °NÓ   pµÀ    ³ú
+   7ú
+    ³ú
+    ³ú
+    µÀ   ğCÅ   @:ú
+   ğCÅ   ğCÅ   ğCÅ   ĞµÀ   ğCÅ   7ú
+   ğCÅ    ¶À   ğ»Å   @:ú
+   0¶À   ğ»Å   7ú
+   ğ»Å   `¶À    “ú
+   @:ú
+   ¶À    “ú
+   7ú
+    “ú
+   À¶À   À8ğ
+   @:ú
+   ğ¶À   À8ğ
+   7ú
+   À8ğ
+   €6ú
+   ğCÅ   ğ»Å    “ú
+   À8ğ
+   ¨.ú
+   ğÚª    ·À   ‹!	   °9ú
+   P·À   Ø—î
+   à?ú
+   €·À    j	   @@ú
+    j	    j	   @:ú
+   Ø—î
+   à?ú
+   @@ú
+   ¨.ú
+   °·À   °9ú
+   ¨.ú
+   ¨.ú
+   à·À   pTÓ   ğLÓ   °9ú
+   ğLÓ   ğLÓ   ¨.ú
+   ¨.ú
+   ¸À   À8ğ
+   à?ú
+   À8ğ
+   @¸À   °TÓ   @@ú
+   @:ú
+   À8ğ
+   p¸À   0NÓ   à?ú
+    ¸À   Ğ¸À   @@ú
+   ¨.ú
+   0NÓ   0NÓ   0NÓ   ¨.ú
+   ğTÓ   ğLÓ   ğOÓ   @:ú
+   ğOÓ   ğOÓ   0UÓ   ÀßÅ   P6ú
+    ¹À   0NÓ   à?ú
+   0NÓ   0¹À   `¹À   @@ú
+   €6ú
+   0NÓ   0NÓ   ¨.ú
+   ÀßÅ   ÀßÅ   ÀßÅ   0NÓ   ÀßÅ   pUÓ   °UÓ   @:ú
+   °UÓ   °UÓ   ¹À    ³ú
+   P6ú
+   °6ú
+   À¹À    “ú
+   7ú
+    “ú
+   ğ¹À    ºÀ   À8ğ
+   €6ú
+   À8ğ
+   ¨.ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+   PºÀ   °ˆK   @:ú
+   °ˆK   °ˆK   €ºÀ   ğÚª   p7ú
+   ğUÓ   ğ‘K   P6ú
+   €6ú
+   ¨.ú
+   ğÚª   ğÚª   ğÚª   ğ‘K   ğÚª   °ºÀ   pPÓ   @:ú
+   pPÓ   pPÓ   àºÀ   °ˆK   »À   °ˆK   °ˆK   °ˆK   @»À   0VÓ    ÕÅ   P6ú
+   €6ú
+   ¨.ú
+    ÕÅ   p»À    »À   0äø   p7ú
+   0äø   Ğ»À   °+	   P6ú
+   °VÓ   °UÓ   €6ú
+   °UÓ   °UÓ   °UÓ   °9ú
+   0äø   ¨.ú
+   ¨.ú
+    ¼À   0¼À   pPÓ   °9ú
+   pPÓ   pPÓ   ¨.ú
+   ¨.ú
+   ğVÓ   °UÓ   @:ú
+   °UÓ   °UÓ   `¼À   ¼À   `¤V	   p7ú
+   À¼À   p%c   P6ú
+   0WÓ   °UÓ   7ú
+   °UÓ   °UÓ   °UÓ   ğ¼À   X¡ú
+   @:ú
+   X¡ú
+   X¡ú
+   X¡ú
+    ½À   0NÓ   à?ú
+   P½À   €½À   @@ú
+   €6ú
+   0NÓ   X¡ú
+   °½À   `¤V	   ¨.ú
+   à½À   pPÓ   °9ú
+   ¨.ú
+   ¨.ú
+   ¾À   @¾À   0®   P6ú
+   p¾À   pWÓ   ğ‹   P6ú
+    ¾À   0NÓ   à?ú
+   0NÓ   Ğ¾À    ¿À   @@ú
+   €6ú
+   0NÓ   0NÓ   €6ú
+   ğ‹   °9ú
+   0®   ¨.ú
+   ¨.ú
+   °WÓ   °UÓ   @:ú
+   °UÓ   °UÓ   0¿À   ğWÓ   °UÓ   ¨.ú
+   °UÓ   ¨.ú
+   ¨.ú
+   ¨.ú
+   `¿À   0äø   ¿À   À¿À   ğ¼ú
+   0 Á   ğ¼ú
+   0XÓ   pXÓ   P6ú
+   ` Á   (2ï
+   @:ú
+   (2ï
+   (2ï
+   (2ï
+   (2ï
+   °XÓ   °UÓ   7ú
+   °UÓ    Á   0NÓ   @:ú
+   À Á   0NÓ   7ú
+   0NÓ   ğ Á   ğXÓ   @:ú
+   P6ú
+    Á   0NÓ   à?ú
+   0NÓ   PÁ   €Á   @@ú
+   p7ú
+   °Á   pwb   àÁ   0NÓ   Á   @Á   pÁ    Á   0NÓ   à?ú
+   ĞÁ    Á   @@ú
+   0Á   0NÓ   `Á   €6ú
+   0NÓ   7ú
+   0NÓ   0NÓ   Á   °ˆK   @:ú
+   ÀÁ   pPÓ   7ú
+   pPÓ   ğÁ   ‹!	   @:ú
+   PÁ   ‹!	   7ú
+   ‹!	   €Á   ğ¸Å   @:ú
+   °Á   ğCÅ   p7ú
+   àÁ   È³ú
+   P6ú
+   Á   0YÓ   €6ú
+   7ú
+   ğCÅ   °YÓ   ğOÓ   @:ú
+   ğYÓ   ğOÓ   7ú
+   ğOÓ   €6ú
+   (2ï
+   0NÓ   ğXÓ   °ˆK   ‹!	   ğ¸Å   ğOÓ   °9ú
+   pXÓ   ¨.ú
+   ¨.ú
+   @Á   pÁ   ğ¼ú
+   ¨.ú
+   ğ¼ú
+   ¨.ú
+   ¨.ú
+    Á   ĞÁ   ğù    Á   ğù   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+   pVÓ   pSÓ   P6ú
+   pSÓ   ÀAú
+   ğû
+   €6ú
+   ğû
+   ğû
+   ğû
+   ¨.ú
+   pSÓ   pSÓ   pSÓ   pSÓ   ğû
+   pSÓ   0Á   `Á   `¤V	   p7ú
+   Á    ãK   P6ú
+   ÀÁ   ğÚª   p7ú
+   ğÚª   ğÁ   pNÓ   P6ú
+    Á   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m   PÁ   pCÅ   7ú
+   pCÅ   pCÅ   €Á   0NÓ   7ú
+   0NÓ   0NÓ   °Á   pØ÷
+   @:ú
+   pØ÷
+   pØ÷
+   pØ÷
+   ÀAú
+   ğû
+   7ú
+   ğû
+   àÁ    W   @:ú
+   pYÓ   0ZÓ   P6ú
+   Á   ‹!	   7ú
+   ‹!	   ‹!	   ‹!	   @Á   ğ·Å   €6ú
+   ğ·Å   ğ·Å   7ú
+   0ZÓ   €6ú
+   pØ÷
+    W   €6ú
+   ğÚª   ğÚª   ¨.ú
+   `¤V	   pÁ   ¨.ú
+   ¨.ú
+    Á   ĞÁ   ğÚª   p7ú
+    	Á   pNÓ   P6ú
+   0	Á   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m   `	Á   pCÅ   7ú
+   pCÅ   pCÅ   	Á   0NÓ   7ú
+   0NÓ   0NÓ   À	Á    W   @:ú
+    W    W    W   pZÓ   0ZÓ   P6ú
+   ğ	Á   ‹!	   7ú
+   ‹!	   ‹!	   ‹!	    
+Á   ğ·Å   €6ú
+   ğ·Å   ğ·Å   7ú
+   0ZÓ   €6ú
+    W   ¨.ú
+   ğÚª   ¨.ú
+   Ğ:ú
+   P
+Á   pƒ	   p7ú
+   pƒ	   €
+Á   `[	   P6ú
+   °
+Á    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   ¨.ú
+   pƒ	   à
+Á   Á   p`	   P6ú
+   °6ú
+   @Á    “ú
+   °9ú
+   pÁ    j	   7ú
+    j	    Á   ğ»Å   °9ú
+   ĞÁ   pŠ	   à?ú
+    Á   0ºÅ   @@ú
+   0ºÅ   0ºÅ   @:ú
+   pŠ	   0Á   7ú
+   `Á   Á   À8ğ
+   °9ú
+   ÀÁ    j	   7ú
+    j	   €6ú
+   ğÁ    Á    j	   °9ú
+    j	   ¨.ú
+   ¨.ú
+    =Î   p=Î   ¨.ú
+   PÁ   €Á   ğZÓ   °MÓ   °9ú
+   °MÓ   ¨.ú
+   ¨.ú
+   °Á   À8ğ
+   p7ú
+   À8ğ
+   àÁ   &ğ
+   P6ú
+   Á   @Á   7ú
+   pÁ   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+   ¨.ú
+    Á   0NÓ   @:ú
+   0NÓ   0NÓ   ĞÁ   °NÓ   P6ú
+    Á    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+   0Á   ğCÅ   @:ú
+   ğCÅ   ğCÅ   ğCÅ   `Á   ğCÅ   7ú
+   ğCÅ   Á   ğ»Å   @:ú
+   ÀÁ   ğ»Å   7ú
+   ğ»Å   ğÁ    “ú
+   @:ú
+    Á    “ú
+   7ú
+    “ú
+   PÁ   À8ğ
+   @:ú
+   €Á   À8ğ
+   7ú
+   À8ğ
+   €6ú
+   ğCÅ   ğ»Å    “ú
+   À8ğ
+   ¨.ú
+   °NÓ   °NÓ   °NÓ    ³ú
+   °NÓ   0[Ó   ğLÓ   @:ú
+   ğLÓ   ğLÓ   P6ú
+   °Á   0äø   p7ú
+   0äø   àÁ   p[,	   P6ú
+   Á    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   p7ú
+   @Á   ğ!	   p7ú
+   pÁ   È³ú
+   P6ú
+    Á   p[Ó   7ú
+   ĞÁ   €6ú
+    Á   0äø   0Á   `Á   €6ú
+   0äø   ¨.ú
+   0äø   p[,	    ³ú
+   ğ!	   È³ú
+   0äø   0äø   0äø   0äø   0äø   0äø   Á   °9ú
+   ¨.ú
+   ¨.ú
+   ÀÁ   °[Ó   ğLÓ   °9ú
+   ğLÓ   ğLÓ   ¨.ú
+   ¨.ú
+   ğÁ   À8ğ
+   à?ú
+   À8ğ
+    Á   ğ[Ó   @@ú
+   @:ú
+   À8ğ
+   PÁ   0NÓ   à?ú
+   €Á   °Á   @@ú
+   ¨.ú
+   0NÓ   0NÓ   0NÓ   ¨.ú
+   0\Ó   ğLÓ   ğOÓ   @:ú
+   ğOÓ   ğOÓ   p\Ó   ÀßÅ   P6ú
+   àÁ   0NÓ   à?ú
+   0NÓ   Á   @Á   @@ú
+   €6ú
+   0NÓ   0NÓ   ¨.ú
+   ÀßÅ   ÀßÅ   ÀßÅ   0NÓ   ÀßÅ   pÁ   °\Ó   ğOÓ   °9ú
+   ğOÓ   ğOÓ   ¨.ú
+   ¨.ú
+    Á   ğ\Ó   pQÓ   P6ú
+   €6ú
+   °9ú
+   ¨.ú
+   ¨.ú
+   ĞÁ   0]Ó   ğOÓ   °9ú
+   ğOÓ   ¨.ú
+   ¨.ú
+    Á   0Á    ³ú
+   P6ú
+   °6ú
+   `Á    “ú
+   7ú
+    “ú
+   Á   ÀÁ   À8ğ
+   €6ú
+   À8ğ
+   ¨.ú
+    ³ú
+   ¨.ú
+   ¨.ú
+   ğÁ   ğQÓ   @:ú
+   ğQÓ   ğQÓ    Á   0NÓ   à?ú
+   PÁ   €Á   @@ú
+   p7ú
+   °Á    ğ   P6ú
+   p]Ó   pQÓ   €6ú
+   pQÓ   pQÓ   pQÓ   ¨.ú
+   0NÓ   0NÓ   0NÓ    ğ   pQÓ   0NÓ   ¨.ú
+   àÁ   ğOÓ   °9ú
+   ¨.ú
+   ¨.ú
+   Á   ğQÓ   @:ú
+   ğQÓ   ğQÓ   @Á   0NÓ   à?ú
+   pÁ    Á   @@ú
+   p7ú
+   ĞÁ    ğ   P6ú
+    Á    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+   °6ú
+   0Á    “ú
+   7ú
+    “ú
+   `Á   Á   À8ğ
+   €6ú
+   À8ğ
+   ¨.ú
+   0NÓ   0NÓ   0NÓ    ğ    ³ú
+   0NÓ   ¨.ú
+   ¨.ú
+   ÀÁ   ğÁ   ğù    Á   ğù   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+   °]Ó   pSÓ   P6ú
+   pSÓ   ÀAú
+   ğû
+   €6ú
+   ğû
+   ğû
+   ğû
+   ¨.ú
+   pSÓ   pSÓ   pSÓ   pSÓ   ğû
+   pSÓ   PÁ   pCÅ   P6ú
+   pCÅ   €Á   0NÓ   7ú
+   0NÓ   0NÓ   0NÓ   °Á   pØ÷
+   @:ú
+   pØ÷
+   pØ÷
+   pØ÷
+   ÀAú
+   ğû
+   €6ú
+   ğû
+   pØ÷
+   ¨.ú
+   pCÅ   pCÅ   pCÅ   pCÅ   0NÓ   pCÅ   àÁ   ¨.ú
+   ¨.ú
+   Á   pCÅ   P6ú
+   pCÅ   @Á   0NÓ   7ú
+   0NÓ   0NÓ   0NÓ   pÁ    W   @:ú
+    W    W    W    Á   ğQÓ   €6ú
+   ğQÓ    W   ¨.ú
+   pCÅ   pCÅ   pCÅ   pCÅ   0NÓ   pCÅ   ĞÁ    Á   ğQÓ   ¨.ú
+   ğQÓ   ¨.ú
+   Ğ:ú
+   0Á   pƒ	   p7ú
+   pƒ	   `Á   `[	   P6ú
+   Á    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   ¨.ú
+   pƒ	   ÀÁ   ğ]Ó   0^Ó   P6ú
+   °6ú
+   ğÁ    “ú
+   °9ú
+    Á    j	   7ú
+    j	   PÁ   ğ»Å   °9ú
+   €Á   pŠ	   à?ú
+   °Á   0ºÅ   @@ú
+   0ºÅ   0ºÅ   @:ú
+   pŠ	   àÁ   7ú
+   Á   @Á   À8ğ
+   °9ú
+   pÁ    j	   €6ú
+    j	   À8ğ
+    Á   ĞÁ    j	   °9ú
+    j	   ¨.ú
+   ¨.ú
+    Á   0Á   p^Ó   °MÓ   °9ú
+   °MÓ   ¨.ú
+   ¨.ú
+   `Á   À8ğ
+   p7ú
+   À8ğ
+   Á   &ğ
+   P6ú
+   ÀÁ   ğÁ   7ú
+    Á   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+   ¨.ú
+   PÁ   0NÓ   @:ú
+   0NÓ   0NÓ   €Á   °NÓ   P6ú
+   °Á    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+   àÁ   ğCÅ   @:ú
+   ğCÅ   ğCÅ   ğCÅ    Á   ğCÅ   7ú
+   ğCÅ   @ Á   ğ»Å   @:ú
+   p Á   ğ»Å   7ú
+   ğ»Å     Á    “ú
+   @:ú
+   Ğ Á    “ú
+   7ú
+    “ú
+   0!Á   À8ğ
+   @:ú
+   `!Á   À8ğ
+   7ú
+   À8ğ
+   €6ú
+   ğCÅ   ğ»Å    “ú
+   À8ğ
+   ¨.ú
+   °NÓ   °NÓ   °NÓ    ³ú
+   °NÓ   °^Ó   ğLÓ   @:ú
+   ğLÓ   ğLÓ   P6ú
+   !Á   0äø   p7ú
+   0äø   À!Á   p[,	   P6ú
+   ğ!Á    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   p7ú
+    "Á   ğ!	   p7ú
+   P"Á   È³ú
+   P6ú
+   €"Á   ğ^Ó   7ú
+   °"Á   €6ú
+   à"Á   0äø   #Á   @#Á   €6ú
+   0äø   ¨.ú
+   0äø   p[,	    ³ú
+   ğ!	   È³ú
+   0äø   0äø   0äø   0äø   0äø   0äø   p#Á   ‹!	   °9ú
+    #Á   Ø—î
+   à?ú
+   Ğ#Á    j	   @@ú
+    j	    j	   @:ú
+   Ø—î
+   à?ú
+   @@ú
+   ¨.ú
+    $Á   0_Ó   °9ú
+   0$Á    j	   @:ú
+    j	   `$Á   ¨.ú
+   $Á   °9ú
+   ¨.ú
+   ¨.ú
+   À$Á   °_Ó   ğLÓ   °9ú
+   ğLÓ   ğLÓ   ¨.ú
+   ¨.ú
+   ğ$Á   À8ğ
+   à?ú
+   À8ğ
+    %Á   ğ_Ó   @@ú
+   @:ú
+   À8ğ
+   P%Á   0NÓ   à?ú
+   €%Á   °%Á   @@ú
+   ¨.ú
+   0NÓ   0NÓ   0NÓ   ¨.ú
+   0`Ó   ğLÓ   p`Ó   @:ú
+   p`Ó   p`Ó   à%Á   0NÓ   à?ú
+   &Á   @&Á   @@ú
+   p7ú
+   p&Á    ğ   P6ú
+    &Á    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+   °6ú
+   Ğ&Á    “ú
+   7ú
+    “ú
+    'Á   0'Á   À8ğ
+   €6ú
+   À8ğ
+   ¨.ú
+   0NÓ   0NÓ   0NÓ    ğ    ³ú
+   0NÓ   °`Ó   ğOÓ   @:ú
+   ğOÓ   ğOÓ   ğ`Ó   ÀßÅ   P6ú
+   `'Á   0NÓ   à?ú
+   0NÓ   'Á   À'Á   @@ú
+   €6ú
+   0NÓ   0NÓ   ¨.ú
+   ÀßÅ   ÀßÅ   ÀßÅ   0NÓ   ÀßÅ   ğ'Á   0_Ó   @:ú
+   0_Ó   0_Ó    (Á   P(Á   0aÓ   paÓ   P6ú
+   °aÓ   p`Ó   7ú
+   p`Ó   p`Ó   p`Ó   €(Á   0NÓ   7ú
+   0NÓ   0NÓ   °(Á   ğXÓ   @:ú
+   ğXÓ   ğXÓ   ğXÓ   à(Á   pwb   )Á   pwb   @)Á   p)Á   7ú
+    )Á   ‹!	   @:ú
+   Ğ)Á   ‹!	   7ú
+   ‹!	    *Á   ğ¸Å   @:ú
+   0*Á   ğCÅ   p7ú
+   `*Á   È³ú
+   P6ú
+   *Á   ğaÓ   €6ú
+   7ú
+   ğCÅ   0bÓ   ğOÓ   @:ú
+   pbÓ   ğOÓ   7ú
+   ğOÓ   €6ú
+   ğXÓ   ‹!	   ğ¸Å   ğOÓ   ¨.ú
+   paÓ   À*Á   ğ*Á   0_Ó    +Á   0_Ó   0_Ó   P+Á   €+Á   °9ú
+   ¨.ú
+   ¨.ú
+   °+Á   ‹!	   p7ú
+   ‹!	   à+Á   ’ú
+   P6ú
+   ,Á   0_Ó   €6ú
+   0_Ó   0_Ó   0_Ó   ¨.ú
+   ‹!	   ‹!	   ‹!	   ‹!	   ’ú
+   0_Ó   ‹!	   ¨.ú
+   ¨.ú
+   0_Ó   @,Á   p,Á   ğù    ,Á   ğù   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+   °bÓ   pSÓ   P6ú
+   pSÓ   ÀAú
+   ğû
+   €6ú
+   ğû
+   ğû
+   ğû
+   ¨.ú
+   pSÓ   pSÓ   pSÓ   pSÓ   ğû
+   pSÓ   Ğ,Á   pCÅ   P6ú
+   pCÅ    -Á   0NÓ   7ú
+   0NÓ   0NÓ   0NÓ   0-Á   pØ÷
+   @:ú
+   pØ÷
+   pØ÷
+   pØ÷
+   ÀAú
+   ğû
+   7ú
+   ğû
+   `-Á    W   @:ú
+   ğbÓ   0ZÓ   P6ú
+   -Á   ‹!	   7ú
+   ‹!	   ‹!	   ‹!	   À-Á   ğ·Å   €6ú
+   ğ·Å   ğ·Å   7ú
+   0ZÓ   €6ú
+   pØ÷
+    W   ¨.ú
+   pCÅ   pCÅ   pCÅ   pCÅ   0NÓ   pCÅ   ğ-Á   ¨.ú
+   ¨.ú
+    .Á   pCÅ   P6ú
+   pCÅ   P.Á   0NÓ   7ú
+   0NÓ   0NÓ   0NÓ   €.Á    W   @:ú
+    W    W    W   0cÓ   0ZÓ   P6ú
+   °.Á   ‹!	   7ú
+   ‹!	   ‹!	   ‹!	   à.Á   ğ·Å   €6ú
+   ğ·Å   ğ·Å   €6ú
+   0ZÓ    W   ¨.ú
+   pCÅ   pCÅ   pCÅ   pCÅ   0NÓ   pCÅ   /Á   @/Á   0_Ó   ¨.ú
+   0_Ó   ¨.ú
+   Ğ:ú
+   p/Á   pƒ	   p7ú
+   pƒ	    /Á   `[	   P6ú
+   Ğ/Á    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   ¨.ú
+   pƒ	    0Á   00Á   p_Ó   P6ú
+   °6ú
+   `0Á    “ú
+   °9ú
+   0Á    j	   7ú
+    j	   À0Á   ğ»Å   °9ú
+   ğ0Á   pŠ	   à?ú
+    1Á   0ºÅ   @@ú
+   0ºÅ   0ºÅ   @:ú
+   pŠ	   P1Á   7ú
+   €1Á   °1Á   À8ğ
+   °9ú
+   à1Á    j	   €6ú
+    j	   À8ğ
+   2Á   @2Á    j	   °9ú
+    j	   ¨.ú
+   ¨.ú
+   p2Á    2Á   pcÓ   °MÓ   °9ú
+   °MÓ   ¨.ú
+   ¨.ú
+   Ğ2Á   À8ğ
+   p7ú
+   À8ğ
+    3Á   &ğ
+   P6ú
+   03Á   `3Á   7ú
+   3Á   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+   ¨.ú
+   À3Á   °cÓ   @:ú
+   °cÓ   °cÓ   ğ3Á   °NÓ   P6ú
+    4Á    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+   P4Á   ğCÅ   @:ú
+   ğCÅ   ğCÅ   ğCÅ   €4Á   ğCÅ   7ú
+   ğCÅ   °4Á   ğ»Å   @:ú
+   à4Á   ğ»Å   7ú
+   ğ»Å   5Á    “ú
+   @:ú
+   @5Á    “ú
+   7ú
+    “ú
+   p5Á   À8ğ
+   @:ú
+    5Á   À8ğ
+   7ú
+   À8ğ
+   €6ú
+   ğCÅ   ğ»Å    “ú
+   À8ğ
+   ¨.ú
+   °NÓ   °NÓ   °NÓ    ³ú
+   °NÓ   Ğ5Á   °9ú
+   ¨.ú
+   ¨.ú
+    6Á   ğcÓ   ğLÓ   °9ú
+   ğLÓ   ğLÓ   ¨.ú
+   ¨.ú
+   06Á   À8ğ
+   à?ú
+   À8ğ
+   `6Á   0dÓ   @@ú
+   @:ú
+   À8ğ
+   6Á   °cÓ   à?ú
+   À6Á   ğ6Á   @@ú
+   ¨.ú
+   °cÓ   °cÓ   °cÓ   ¨.ú
+    7Á   ğLÓ   (Hô
+   @:ú
+   (Hô
+   (Hô
+   P7Á   °cÓ   à?ú
+   €7Á   °7Á   @@ú
+   p7ú
+   à7Á    ğ   P6ú
+   8Á    ³ú
+   7ú
+    ³ú
+    ³ú
+    ³ú
+   °6ú
+   @8Á    “ú
+   7ú
+    “ú
+   p8Á    8Á   À8ğ
+   €6ú
+   À8ğ
+   ¨.ú
+   °cÓ   °cÓ   °cÓ    ğ    ³ú
+   °cÓ   ¨.ú
+   Ğ8Á    9Á   ûï
+   09Á   ûï
+   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+   pdÓ   pSÓ   P6ú
+   pSÓ   ÀAú
+   ğû
+   €6ú
+   ğû
+   ğû
+   ğû
+   ¨.ú
+   pSÓ   pSÓ   pSÓ   pSÓ   ğû
+   pSÓ   `9Á   pCÅ   P6ú
+   pCÅ   9Á   °cÓ   7ú
+   °cÓ   °cÓ   °cÓ   À9Á   pØ÷
+   @:ú
+   pØ÷
+   pØ÷
+   pØ÷
+   ÀAú
+   ğû
+   €6ú
+   ğû
+   pØ÷
+   ¨.ú
+   pCÅ   pCÅ   pCÅ   pCÅ   °cÓ   pCÅ   ğ9Á   ¨.ú
+   ¨.ú
+    :Á   P:Á   X\ï
+   P6ú
+   X\ï
+   €:Á   (Hô
+   7ú
+   (Hô
+   (Hô
+   (Hô
+   °:Á   °dÓ   €6ú
+   °9ú
+   X\ï
+   ¨.ú
+   ¨.ú
+   à:Á   ;Á   ğdÓ   P6ú
+   @;Á   (Hô
+   7ú
+   (Hô
+   (Hô
+   (Hô
+   p;Á   °cÓ   7ú
+   °cÓ   °cÓ    ;Á   ğ·Å   €6ú
+   ğ·Å   ğ·Å   ¨.ú
+   ğdÓ   ¨.ú
+   Ğ;Á    <Á   X\ï
+   P6ú
+   X\ï
+   0<Á   (Hô
+   7ú
+   (Hô
+   (Hô
+   (Hô
+   `<Á   0eÓ   €6ú
+   °9ú
+   X\ï
+   ¨.ú
+   ¨.ú
+   <Á   peÓ   °eÓ   P6ú
+   À<Á   (Hô
+   7ú
+   (Hô
+   (Hô
+   (Hô
+   ğ<Á   °cÓ   7ú
+   °cÓ   °cÓ    =Á   ğ·Å   €6ú
+   ğ·Å   ğ·Å   ¨.ú
+   °eÓ   ¨.ú
+   P=Á   X\ï
+   pCÅ   P6ú
+   pCÅ   €=Á   °cÓ   7ú
+   °cÓ   °cÓ   °cÓ   °=Á    W   @:ú
+    W    W    W   à=Á   (Hô
+   €6ú
+   (Hô
+    W   ¨.ú
+   pCÅ   pCÅ   pCÅ   pCÅ   °cÓ   pCÅ   >Á   @>Á   (Hô
+   ¨.ú
+   (Hô
+   ¨.ú
+   Ğ:ú
+   p>Á   pƒ	   p7ú
+   pƒ	    >Á   `[	   P6ú
+   Ğ>Á    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   ¨.ú
+   pƒ	    ?Á   0?Á   ğeÓ   0fÓ   P6ú
+   °6ú
+   `?Á    “ú
+   °9ú
+   ?Á    j	   7ú
+    j	   À?Á   ğ»Å   °9ú
+   0@Á   pŠ	   à?ú
+   `@Á   0ºÅ   @@ú
+   0ºÅ   0ºÅ   @:ú
+   pŠ	   @Á   7ú
+   À@Á   ğ@Á   À8ğ
+   °9ú
+    AÁ    j	   €6ú
+    j	   À8ğ
+   PAÁ   €AÁ    j	   °9ú
+    j	   ¨.ú
+   ¨.ú
+   °AÁ   àAÁ   pfÓ   °MÓ   °9ú
+   °MÓ   ¨.ú
+   ¨.ú
+   BÁ   À8ğ
+   p7ú
+   À8ğ
+   @BÁ   &ğ
+   P6ú
+   pBÁ    BÁ   7ú
+   ĞBÁ   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+   ¨.ú
+    CÁ   °cÓ   @:ú
+   °cÓ   °cÓ   0CÁ   `CÁ   ğÚª   p7ú
+   CÁ   pNÓ   P6ú
+   ÀCÁ   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m   ğCÁ   °NÓ   7ú
+   °NÓ   °NÓ    DÁ    ³ú
+   7ú
+    ³ú
+    ³ú
+   PDÁ   ğCÅ   @:ú
+   ğCÅ   ğCÅ   ğCÅ   €DÁ   ğCÅ   7ú
+   ğCÅ   °DÁ   ğ»Å   @:ú
+   àDÁ   ğ»Å   7ú
+   ğ»Å   EÁ    “ú
+   @:ú
+   @EÁ    “ú
+   7ú
+    “ú
+   pEÁ   À8ğ
+   @:ú
+    EÁ   À8ğ
+   7ú
+   À8ğ
+   €6ú
+   ğCÅ   ğ»Å    “ú
+   À8ğ
+   ¨.ú
+   ğÚª   ĞEÁ   °9ú
+   ¨.ú
+   ¨.ú
+    FÁ   °fÓ   ğLÓ   °9ú
+   ğLÓ   ğLÓ   ¨.ú
+   ¨.ú
+   0FÁ   À8ğ
+   à?ú
+   À8ğ
+   `FÁ   ğfÓ   @@ú
+   @:ú
+   À8ğ
+   FÁ   °cÓ   à?ú
+   ÀFÁ   ğFÁ   @@ú
+   ¨.ú
+   °cÓ   °cÓ   °cÓ   ¨.ú
+    GÁ   ğLÓ   (Hô
+   @:ú
+   (Hô
+   (Hô
+   PGÁ   €GÁ    ³ú
+   P6ú
+   °6ú
+   °GÁ    “ú
+   7ú
+    “ú
+   àGÁ   HÁ   À8ğ
+   €6ú
+   À8ğ
+   ¨.ú
+    ³ú
+   ¨.ú
+   @HÁ   pHÁ   ûï
+    HÁ   ûï
+   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+   ĞHÁ    IÁ   ğÚª   p7ú
+   `IÁ   pNÓ   P6ú
+   IÁ   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m   ÀIÁ   pCÅ   7ú
+   pCÅ   pCÅ   ğIÁ   °cÓ   7ú
+   °cÓ   °cÓ    JÁ   pØ÷
+   @:ú
+   pØ÷
+   pØ÷
+   pØ÷
+   ÀAú
+   ğû
+   €6ú
+   ğû
+   pØ÷
+   ¨.ú
+   ğÚª   PJÁ   ¨.ú
+   ¨.ú
+   €JÁ   °JÁ   X\ï
+   P6ú
+   X\ï
+   àJÁ   (Hô
+   7ú
+   (Hô
+   (Hô
+   (Hô
+   KÁ   0gÓ   €6ú
+   °9ú
+   X\ï
+   ¨.ú
+   ¨.ú
+   @KÁ   pgÓ   °eÓ   P6ú
+   pKÁ   (Hô
+   7ú
+   (Hô
+   (Hô
+   (Hô
+    KÁ   °cÓ   7ú
+   °cÓ   °cÓ   ĞKÁ   ğ·Å   €6ú
+   ğ·Å   ğ·Å   ¨.ú
+   °eÓ   ¨.ú
+    LÁ   0LÁ   X\ï
+   P6ú
+   X\ï
+   `LÁ   (Hô
+   7ú
+   (Hô
+   (Hô
+   (Hô
+   LÁ   °gÓ   €6ú
+   °9ú
+   X\ï
+   ¨.ú
+   ¨.ú
+   ÀLÁ   ğLÁ   ğdÓ   P6ú
+    MÁ   (Hô
+   7ú
+   (Hô
+   (Hô
+   (Hô
+   PMÁ   °cÓ   7ú
+   °cÓ   °cÓ   €MÁ   ğ·Å   €6ú
+   ğ·Å   ğ·Å   ¨.ú
+   ğdÓ   ¨.ú
+   °MÁ   X\ï
+   àMÁ   ğÚª   p7ú
+   NÁ   pNÓ   P6ú
+   @NÁ   ğ6m   P6ú
+   ğ6m   €6ú
+   7ú
+   ğ6m   ğ6m   pNÁ   pCÅ   7ú
+   pCÅ   pCÅ    NÁ   °cÓ   7ú
+   °cÓ   °cÓ   ĞNÁ    W   @:ú
+    W    W    W    OÁ   (Hô
+   €6ú
+   (Hô
+    W   ¨.ú
+   ğÚª   0OÁ   `OÁ   (Hô
+   ¨.ú
+   (Hô
+   ¨.ú
+   OÁ   ÀOÁ   0äø   p7ú
+   0äø   °ZÓ   ğ+	   P6ú
+   ğOÁ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   °9ú
+   0äø   ¨.ú
+   ¨.ú
+   ğgÓ   0hÓ   °9ú
+    PÁ   È)ï
+   @:ú
+   È)ï
+   phÓ   ğSÓ   ¨.ú
+   ğSÓ   ¨.ú
+   PPÁ   €PÁ   0äø   p7ú
+   0äø   °hÓ   °+	   P6ú
+   °PÁ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   °9ú
+   0äø   ¨.ú
+   ¨.ú
+   ğhÓ   0hÓ   @:ú
+   0hÓ   0hÓ   0iÓ   0^Ó   ¨.ú
+   0^Ó   0^Ó   0^Ó   ¨.ú
+   àPÁ   QÁ   ğ'	   P6ú
+   ğ'	   @QÁ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   °9ú
+   ğ'	   ¨.ú
+   ¨.ú
+   pQÁ    QÁ   ğ·Å   °9ú
+   ğ·Å   ğ·Å   ¨.ú
+   ¨.ú
+   piÓ   0hÓ   @:ú
+   0hÓ   0hÓ   °iÓ   0fÓ   ¨.ú
+   0fÓ   0fÓ   0fÓ   ¨.ú
+   ĞQÁ   ğ·Å   °9ú
+   ¨.ú
+   ¨.ú
+   ğiÓ   0hÓ   @:ú
+   0hÓ   0hÓ    RÁ   0   ¨.ú
+   0   0   0   ¨.ú
+   ¨.ú
+   0RÁ   ğ'	   °9ú
+   ¨.ú
+   ¨.ú
+   `RÁ   RÁ   ğ·Å   °9ú
+   ğ·Å   ğ·Å   ¨.ú
+   ¨.ú
+   0jÓ   0hÓ   @:ú
+   0hÓ   0hÓ   ÀRÁ   p_Ó   ¨.ú
+   p_Ó   p_Ó   p_Ó   ¨.ú
+   ğRÁ   ğ·Å   °9ú
+   ¨.ú
+   ¨.ú
+   pjÓ   0hÓ   @:ú
+   0hÓ   0hÓ    SÁ   p`	   ¨.ú
+   p`	   p`	   p`	   ¨.ú
+   ¨.ú
+   PSÁ   ğ
+   P6ú
+   ğ
+   °jÓ   0hÓ   7ú
+   0hÓ   0hÓ   0hÓ   ğjÓ   0kÓ   7ú
+   €SÁ   €6ú
+   ¨.ú
+   ğ
+   ğ
+   ğ
+   ğ
+   0hÓ   ğ
+   °SÁ   ğ
+   P6ú
+   ğ
+   pkÓ   0hÓ   7ú
+   0hÓ   0hÓ   0hÓ   °kÓ   ğkÓ   7ú
+   àEú
+   0lÓ   plÓ   °9ú
+   àSÁ   ğCÅ   p7ú
+   TÁ   È³ú
+   P6ú
+   °lÓ   ğlÓ   €6ú
+   7ú
+   ğCÅ   0mÓ   pmÓ   °9ú
+   °mÓ   pJÓ   7ú
+   pJÓ   @TÁ   pTÁ   °9ú
+    TÁ   ÀC   7ú
+   ÀC   ĞTÁ    UÁ   °9ú
+   0UÁ   ğCÅ   p7ú
+   `UÁ   È³ú
+   P6ú
+   UÁ   ÀUÁ   €6ú
+   7ú
+   ğCÅ   ğUÁ   ğmÓ   °9ú
+    VÁ   ğCÅ   p7ú
+   PVÁ   È³ú
+   P6ú
+   €VÁ   0nÓ   €6ú
+   7ú
+   ğCÅ   °VÁ   àVÁ   °9ú
+   WÁ    ³ú
+   7ú
+    ³ú
+   @Fú
+   7ú
+   €6ú
+   ¨.ú
+   ğ
+   ğ
+   ğ
+   ğ
+   0hÓ   ğ
+   @WÁ    ¥!	   @:ú
+    ¥!	    ¥!	   pWÁ   0äø   p7ú
+    WÁ   p[,	   P6ú
+   pnÓ   0hÓ   €6ú
+   0hÓ   0hÓ   0hÓ   ¨.ú
+   0äø   0äø   0äø   p[,	   0hÓ   0äø   ĞWÁ    XÁ   0XÁ    ¥!	   p7ú
+   `XÁ   ğ!	   p7ú
+   XÁ   È³ú
+   P6ú
+   ÀXÁ   ğXÁ   €6ú
+   °9ú
+    ¥!	   ¨.ú
+   ¨.ú
+    YÁ    ¥!	   @:ú
+    ¥!	    ¥!	   PYÁ    ¥!	   p7ú
+   €YÁ   ˜Úú
+   P6ú
+   °YÁ   ğ!	   @:ú
+   ğ!	   ğ!	   ğ!	   ğ!	   à?ú
+   °6ú
+   P6ú
+   àYÁ   PA	   ZÁ   PA	   PA	   PA	   PA	   @ZÁ   PA	   pZÁ   PA	    ZÁ    ¥!	   p7ú
+   ĞZÁ   ğ!	   p7ú
+    [Á   Øíú
+   P6ú
+   €6ú
+   0[Á    ¥!	   `[Á   PA	   p7ú
+   [Á   ¿ú
+   À[Á   PA	   ğ[Á   0äø   p7ú
+    \Á   pI,	   p7ú
+   P\Á   ğ	   €6ú
+   0äø   7ú
+   PA	   PA	   PA	   €\Á   0äø   p7ú
+   0äø   °\Á   pI,	   P6ú
+   à\Á   ]Á   7ú
+   @]Á   0äø   p7ú
+   0äø   p]Á   pI,	   p7ú
+    ]Á   °	   7ú
+   0äø   Ğ]Á   à£ú
+   @:ú
+   à£ú
+   à£ú
+   à£ú
+    ^Á   €6ú
+   à£ú
+   7ú
+   0äø   °6ú
+   P6ú
+   0^Á   PA	   `^Á   PA	   PA	   PA	   PA	   ^Á   PA	   À^Á   PA	   ğ^Á    ¥!	   p7ú
+    _Á   ğ!	   p7ú
+   P_Á   Øíú
+   P6ú
+   €6ú
+   €_Á    ¥!	   °_Á   PA	   p7ú
+   à_Á   ¿ú
+   `Á   PA	   @`Á   0äø   p7ú
+   p`Á   pI,	   p7ú
+    `Á   ğ	   €6ú
+   0äø   7ú
+   PA	   PA	   PA	   @@ú
+   €6ú
+   0äø   ğ!	   ¨.ú
+    ¥!	    ¥!	    ¥!	   ˜Úú
+   ğ!	    ¥!	   °nÓ   0hÓ   p7ú
+   0hÓ   Ğ`Á   pŒ	   @:ú
+   0hÓ   pŒ	   pŒ	    aÁ    ¥!	   ğnÓ    ¥!	    ¥!	    ¥!	   ¨.ú
+   0aÁ   0oÓ   0hÓ   ¨.ú
+   0hÓ   ¨.ú
+   `aÁ   aÁ   ¸Áú
+   P6ú
+   ¸Áú
+   ÀaÁ    “ú
+   €6ú
+    “ú
+    “ú
+    “ú
+   ğaÁ   ¸Áú
+    8ú
+   ¨ú
+    bÁ   ¨ú
+   PbÁ   ØÂó
+   P6ú
+   €bÁ    “ú
+   à?ú
+    “ú
+   Ğ7ú
+   ˆú
+   @@ú
+   ˆú
+   €6ú
+    “ú
+    “ú
+   °bÁ   ØÂó
+   àbÁ   cÁ   À8ğ
+   °9ú
+   À8ğ
+   ¨.ú
+   ¨.ú
+   @cÁ   pcÁ   °	   P6ú
+    cÁ    “ú
+   à?ú
+    “ú
+   Ğ7ú
+   ˆú
+   @@ú
+   ˆú
+   €6ú
+    “ú
+    “ú
+   ¨.ú
+   °	   ¨.ú
+   ĞcÁ   ¸Áú
+    dÁ   °	   ¨.ú
+   °	   ¨.ú
+   0dÁ   `dÁ   €“!	   °9ú
+   ¨.ú
+   ¨.ú
+    ìŒ@‹   4’@‹  ¨.ú
+   dÁ   ÀdÁ   `tú
+   P6ú
+   ğdÁ   @İú
+   7ú
+    eÁ   ÈÉú
+   °9ú
+   PeÁ   4ï
+   7ú
+   4ï
+   €eÁ   pwb   °9ú
+   °eÁ   °ƒ™   p7ú
+   àeÁ   ğj^   @:ú
+   °ƒ™   pwb   @İú
+   ÈÉú
+   pwb   pwb   @İú
+   ÈÉú
+   pwb   pwb   pwb   fÁ   @fÁ   7ú
+   °6ú
+   @İú
+   ÈÉú
+   pwb   pwb   pwb   @İú
+   ÈÉú
+   pwb   pwb   pwb   7ú
+   pfÁ   Ğ¯š   °9ú
+    fÁ   pŠ	   à?ú
+   ĞfÁ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @:ú
+   pŠ	    gÁ   7ú
+   0gÁ   àe'	   °9ú
+   `gÁ   pŠ	   à?ú
+   gÁ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @:ú
+   pŠ	   ÀgÁ   7ú
+   ğgÁ   °¯   °9ú
+    hÁ   pŠ	   à?ú
+   PhÁ   4ï
+   @@ú
+   4ï
+   4ï
+   @:ú
+   pŠ	   €hÁ   7ú
+   °hÁ   Òú
+   °9ú
+   àhÁ   pŠ	   à?ú
+   iÁ   s	   à?ú
+   @iÁ   p]š   p7ú
+   piÁ   Ğ×K   7ú
+   p]š   p]š   p]š    iÁ   4ï
+   7ú
+   4ï
+   4ï
+   ĞiÁ   h*ï
+   7ú
+   h*ï
+   h*ï
+    jÁ    t	   à?ú
+   0jÁ   `jÁ   @@ú
+   @@ú
+    t	    t	   @@ú
+   s	   s	   @:ú
+   pŠ	   jÁ   7ú
+   ÀjÁ   poî	   °9ú
+   ğjÁ   pŠ	   à?ú
+    kÁ   Ø—î
+   à?ú
+   PkÁ   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   Ø—î
+   Ø—î
+   @:ú
+   pŠ	   €kÁ   7ú
+   °kÁ   ğÆú
+   °9ú
+   àkÁ   pŠ	   à?ú
+   lÁ   h*ï
+   à?ú
+   @lÁ   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+   plÁ    j	   @@ú
+    j	    j	   @@ú
+   h*ï
+   h*ï
+   @:ú
+   pŠ	    lÁ   7ú
+   ĞlÁ   çr	   °9ú
+    mÁ   pŠ	   à?ú
+   0mÁ   °ƒ™   p7ú
+   `mÁ   PĞr	   @@ú
+   °ƒ™   °ƒ™   @:ú
+   pŠ	   mÁ   7ú
+   ÀmÁ   `O   °9ú
+   ğmÁ   pŠ	   à?ú
+    nÁ   °ƒ™   p7ú
+   PnÁ   ùK   @@ú
+   °ƒ™   °ƒ™   @:ú
+   pŠ	   €nÁ   7ú
+   °s×   p$”   °9ú
+   °nÁ   pŠ	   à?ú
+   ànÁ   °ƒ™   p7ú
+   oÁ   ùK   @@ú
+   °ƒ™   °ƒ™   @:ú
+   pŠ	   @oÁ   7ú
+   ğs×   °tb   °9ú
+   poÁ   pŠ	   à?ú
+    oÁ   Ø¶î
+   à?ú
+   ĞoÁ   àëú
+   à?ú
+    pÁ   ğù   @@ú
+   ğù   ğù   7ú
+   àëú
+   àëú
+   àëú
+   0pÁ   @@ú
+   @@ú
+   Ø¶î
+   Ø¶î
+   @:ú
+   pŠ	   `pÁ   7ú
+   pÁ   0×	   °9ú
+   ÀpÁ   pŠ	   à?ú
+   ğpÁ   €ß   p7ú
+    qÁ   0$”   @@ú
+   €ß   €ß   @:ú
+   pŠ	   PqÁ   7ú
+   €qÁ   °qÁ   À8ğ
+   °9ú
+   àqÁ    j	   7ú
+    j	   €6ú
+   °9ú
+   ¨.ú
+   ¨.ú
+   €¢Î   Ğ Î   ¨.ú
+   rÁ   @İú
+   p7ú
+   @İú
+   @rÁ   ps×   @:ú
+   @İú
+   ps×   ps×   prÁ   À8ğ
+   p7ú
+    rÁ   &ğ
+   P6ú
+   ĞrÁ   0t×   7ú
+    sÁ   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   &ğ
+   À8ğ
+   0sÁ   `sÁ   À8ğ
+   °9ú
+   À8ğ
+   À8ğ
+   ¨.ú
+   ¨.ú
+   sÁ   hîú
+   p7ú
+   hîú
+   ÀsÁ   Øğ
+   P6ú
+   à=Î   P>Î   ğsÁ   àEú
+    tÁ   ¸ñ
+   P6ú
+   PtÁ   À8ğ
+   p7ú
+   À8ğ
+   €tÁ   è¾ú
+   P6ú
+   €6ú
+   €6ú
+   À8ğ
+   À8ğ
+   @Fú
+   ¸ñ
+   p7ú
+    ùú
+   05ú
+    ùú
+   7ú
+   pt×   ‘ğ
+   7ú
+   ‘ğ
+   ‘ğ
+   €6ú
+   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+   °tÁ   À8ğ
+   @İú
+   p7ú
+   @İú
+   àtÁ   ÈÉú
+   @:ú
+   @İú
+   ÈÉú
+   ÈÉú
+   uÁ   ÈÉú
+   ¨.ú
+   ÈÉú
+   ÈÉú
+   ÈÉú
+   @uÁ   @İú
+   p7ú
+   @İú
+   puÁ   pwb   @:ú
+   @İú
+   pwb   pwb    uÁ   pwb   ¨.ú
+   pwb   pwb   pwb   ĞuÁ   @İú
+   p7ú
+   @İú
+    vÁ   Ğ¯š   @:ú
+   @İú
+   Ğ¯š   Ğ¯š   0vÁ   Ğ¯š   ¨.ú
+   Ğ¯š   Ğ¯š   Ğ¯š   `vÁ   @İú
+   p7ú
+   @İú
+   vÁ   0×	   @:ú
+   @İú
+   0×	   0×	   ÀvÁ   0×	   ¨.ú
+   0×	   0×	   0×	   ğvÁ   @İú
+   p7ú
+   @İú
+    wÁ   àe'	   @:ú
+   @İú
+   àe'	   àe'	   PwÁ   àe'	   ¨.ú
+   àe'	   àe'	   àe'	   €wÁ   @İú
+   p7ú
+   @İú
+   °wÁ   °¯   @:ú
+   @İú
+   °¯   °¯   àwÁ   °¯   ¨.ú
+   °¯   °¯   °¯   xÁ   @İú
+   p7ú
+   @İú
+   @xÁ   Òú
+   @:ú
+   @İú
+   Òú
+   Òú
+   pxÁ   Òú
+   ¨.ú
+   Òú
+   Òú
+   Òú
+    xÁ   @İú
+   p7ú
+   @İú
+   ĞxÁ   °¬   @:ú
+   @İú
+   °¬   °¬    yÁ   À8ğ
+   p7ú
+   0yÁ   È³ú
+   P6ú
+   `yÁ   °t×   €6ú
+   ¨.ú
+   À8ğ
+   À8ğ
+   À8ğ
+   È³ú
+   À8ğ
+   yÁ   @İú
+   p7ú
+   @İú
+   ÀyÁ   poî	   @:ú
+   @İú
+   poî	   poî	    zÁ   poî	   ¨.ú
+   poî	   poî	   poî	   PzÁ   @İú
+   p7ú
+   @İú
+   €zÁ   ğÆú
+   @:ú
+   @İú
+   ğÆú
+   ğÆú
+   °zÁ   ğÆú
+   ¨.ú
+   ğÆú
+   ğÆú
+   ğÆú
+   àzÁ   @İú
+   p7ú
+   @İú
+   {Á   çr	   @:ú
+   @İú
+   çr	   çr	   @{Á   çr	   ¨.ú
+   çr	   çr	   çr	   p{Á   @İú
+   p7ú
+   @İú
+    {Á   `O   @:ú
+   @İú
+   `O   `O   Ğ{Á   `O   ¨.ú
+   `O   `O   `O    |Á   @İú
+   p7ú
+   @İú
+   ğt×   p$”   @:ú
+   @İú
+   p$”   p$”   0u×   p$”   ¨.ú
+   p$”   p$”   p$”   0|Á   @İú
+   p7ú
+   @İú
+   pu×   °tb   @:ú
+   @İú
+   °tb   °tb   °u×   °tb   ¨.ú
+   °tb   °tb   °tb   `|Á   @İú
+   p7ú
+   @İú
+   |Á   À|Á   °9ú
+   @İú
+   À|Á   ğ|Á   pŠ	   à?ú
+    }Á   p]š   p7ú
+   P}Á   Ğ×K   @@ú
+   p]š   p]š   @:ú
+   pŠ	   €}Á   ¨.ú
+   °}Á   @İú
+   p7ú
+   @İú
+   à}Á   ~Á   °9ú
+   @İú
+   ~Á   @~Á   pŠ	   à?ú
+   p~Á   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @:ú
+   pŠ	    ~Á   ¨.ú
+   ¨.ú
+   Ğ~Á    Á   Ÿî
+   P6ú
+   0Á   @İú
+   €6ú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   `Á   Á   p]š   p7ú
+   ÀÁ   Ğ×K   °9ú
+   p]š   ¨.ú
+   ¨.ú
+   `‘Æ   €”Æ   ¨.ú
+   0€Á   @İú
+   p7ú
+   @İú
+   `€Á   ~Á   @:ú
+   @İú
+   ~Á   ~Á   ğu×   ğ‹   P6ú
+   €6ú
+   ¨.ú
+   ğ‹   ğ‹   ğ‹   ğ‹   €Á   ÀC   @:ú
+   ÀC   ÀC   À€Á   P1]	   p7ú
+   0v×   °k   P6ú
+   ğ€Á   @İú
+   p7ú
+   @İú
+    Á   ~Á   €6ú
+   @İú
+   @İú
+   ¨.ú
+   P1]	   P1]	   P1]	   °k   @İú
+   P1]	   PÁ   pv×   @:ú
+   pv×   pv×   €Á   pn	   p7ú
+   °Á   €ºL   p7ú
+   àÁ   È³ú
+   P6ú
+   €6ú
+   ‚Á   pn	   pn	   pn	   €ºL   È³ú
+   pn	   @‚Á   pn	   p7ú
+   p‚Á   °‹b   ¨.ú
+   pn	    ‚Á   °v×   @:ú
+   °v×   °v×   Ğ‚Á   pn	   p7ú
+   0ƒÁ   0‹b   p7ú
+   `ƒÁ   È³ú
+   P6ú
+   €6ú
+   ƒÁ   pn	   pn	   pn	   0‹b   È³ú
+   pn	   ÀƒÁ   pn	   p7ú
+   ğv×   °Šb   ¨.ú
+   pn	   ğƒÁ    „Á   @:ú
+    „Á    „Á   P„Á   @İú
+   p7ú
+   €„Á   çr	   °„Á   @İú
+   çr	   @İú
+   çr	   @İú
+   à„Á   @İú
+   p7ú
+   …Á   ~Á   p7ú
+   @…Á   È³ú
+   P6ú
+   p…Á    …Á   €6ú
+   ¨.ú
+   @İú
+   Ğ…Á   pw×   @:ú
+   pw×   pw×    †Á   °dË   P6ú
+   àEú
+   0†Á   `†Á   °9ú
+   †Á   @İú
+   p7ú
+   À†Á   Òú
+   7ú
+   @İú
+   ğ†Á   °w×   °9ú
+    ‡Á   @İú
+   p7ú
+   P‡Á   °¬   7ú
+   @İú
+   €‡Á   °‡Á   °9ú
+   à‡Á    „Á   7ú
+    „Á   ˆÁ   ğw×   °9ú
+   @ˆÁ   @İú
+   p7ú
+   pˆÁ   °¯   7ú
+   @İú
+   @Fú
+   €6ú
+   ¨.ú
+   °dË   °dË   °dË   °dË    ˆÁ   ĞˆÁ   @:ú
+   ĞˆÁ   ĞˆÁ    ‰Á   ¸ñ
+   P6ú
+   0‰Á   0ï
+   P6ú
+   0ï
+   P6ú
+   `‰Á   @İú
+   p7ú
+   @İú
+   ‰Á   poî	   À‰Á   @İú
+   à?ú
+   @@ú
+   €6ú
+   @İú
+   à6ú
+   @İú
+   @İú
+   P6ú
+   ğ‰Á   pv×    ŠÁ   pv×   pv×   à?ú
+   @@ú
+   €6ú
+   pv×   €6ú
+   pv×   pv×   €6ú
+   0ï
+   0ï
+   ¨.ú
+   ¸ñ
+   ¸ñ
+   ¸ñ
+   0ï
+   ¸ñ
+   PŠÁ   ğÆú
+   @:ú
+   ğÆú
+   ğÆú
+   àEú
+   €ŠÁ   P6ú
+   °ŠÁ   @İú
+   p7ú
+   @İú
+   àŠÁ   ğÆú
+   ‹Á   @İú
+   àEú
+   @Fú
+   €6ú
+   @İú
+   7ú
+   @İú
+   @İú
+   @‹Á   P6ú
+   p‹Á   °v×    ‹Á   °v×   °v×   àEú
+   @Fú
+   €6ú
+   °v×   7ú
+   °v×   °v×   Ğ‹Á   0x×   °9ú
+    ŒÁ   0ŒÁ   7ú
+   @Fú
+   ¨.ú
+   `ŒÁ   pDÅ   @:ú
+   pDÅ   pDÅ   ŒÁ   @İú
+   p7ú
+   ÀŒÁ   àe'	   ğŒÁ   @İú
+   àe'	   @İú
+   àe'	   @İú
+   àEú
+   @Fú
+   ¨.ú
+    Á   pDÅ   à?ú
+   pDÅ   PÁ   0w×   @@ú
+   @:ú
+   pDÅ   €Á   ğÆú
+   ¨.ú
+   ğÆú
+   ğÆú
+   ğÆú
+   °Á   px×   @:ú
+   px×   px×   °x×   ğx×   P6ú
+   àÁ   @İú
+   p7ú
+   @İú
+   Á   °¯   €6ú
+   @İú
+   @İú
+   ¨.ú
+   ğx×   ğx×   ğx×   @İú
+   ğx×   @Á   pÁ   pw×    Á   pw×   pw×   ĞÁ    Á   0Á   `Á   ÀC   °9ú
+   ÀC   ¨.ú
+   ¨.ú
+   Á   @İú
+   p7ú
+   @İú
+   ÀÁ   À|Á   @:ú
+   @İú
+   À|Á   À|Á   ğÁ   pw×   p7ú
+    Á   °#”   P6ú
+   PÁ   ÈÉú
+   @:ú
+   ÈÉú
+   ÈÉú
+   ÈÉú
+   ÈÉú
+   €Á   @İú
+   p7ú
+   °Á   ÈÉú
+   7ú
+   @İú
+   àÁ   `O   @:ú
+   ‘Á   @İú
+   p7ú
+   @‘Á   `O   7ú
+   @İú
+   p‘Á   pwb   @:ú
+    ‘Á   @İú
+   p7ú
+   Ğ‘Á   pwb   7ú
+   @İú
+    ’Á   àe'	   @:ú
+   0’Á   pDÅ   7ú
+   pDÅ   `’Á   Ğ¯š   @:ú
+   ’Á   @İú
+   p7ú
+   À’Á   Ğ¯š   7ú
+   @İú
+   ğ’Á   poî	   @:ú
+    “Á   ĞˆÁ   7ú
+   ĞˆÁ   P“Á   0×	   @:ú
+   €“Á   @İú
+   p7ú
+   °“Á   0×	   7ú
+   @İú
+   €6ú
+   ÈÉú
+   `O   pwb   àe'	   Ğ¯š   poî	   0×	   ¨.ú
+   pw×   pw×   pw×   °#”   ÈÉú
+   pw×   ¨.ú
+   à“Á   pw×   °9ú
+   ¨.ú
+   ¨.ú
+   ”Á   @İú
+   p7ú
+   @İú
+   @”Á   À|Á   @:ú
+   @İú
+   À|Á   À|Á   p”Á   p]š   p7ú
+    ”Á   Ğ×K   P6ú
+   Ğ”Á   ÈÉú
+   @:ú
+   ÈÉú
+   ÈÉú
+   ÈÉú
+   ÈÉú
+    •Á   @İú
+   p7ú
+   0•Á   ÈÉú
+   7ú
+   @İú
+   `•Á   0·ú
+   @:ú
+   •Á   °ƒ™   p7ú
+   À•Á   0k^   P6ú
+   ğ•Á   @İú
+   p7ú
+   @İú
+    –Á   `O   €6ú
+   @İú
+   @İú
+   7ú
+   °ƒ™   0y×   p$”   @:ú
+   P–Á   °ƒ™   p7ú
+   €–Á   0k^   P6ú
+   °–Á   @İú
+   p7ú
+   @İú
+   py×   p$”   7ú
+   @İú
+   @İú
+   à–Á   0j   @:ú
+   0j   0j   0j   —Á   €6ú
+   0j   7ú
+   °ƒ™   @—Á   pwb   @:ú
+   p—Á   @İú
+   p7ú
+    —Á   pwb   7ú
+   @İú
+   Ğ—Á   àe'	   @:ú
+    ˜Á   pDÅ   7ú
+   pDÅ   0˜Á   °¯   @:ú
+   `˜Á   px×   ˜Á   px×   À˜Á   ğ˜Á   7ú
+    ™Á   p„™   @:ú
+   P™Á   p]š   p7ú
+   €™Á   ptš   p7ú
+   °™Á   È³ú
+   P6ú
+   €6ú
+   7ú
+   p]š   à™Á   Ğ¯š   @:ú
+   šÁ   @İú
+   p7ú
+   @šÁ   Ğ¯š   pšÁ   @İú
+   àEú
+   @Fú
+   7ú
+    šÁ   poî	   @:ú
+   ĞšÁ   ĞˆÁ   7ú
+   ĞˆÁ    ›Á   çr	   @:ú
+   0›Á    „Á   7ú
+    „Á   `›Á   0×	   @:ú
+   ›Á   @İú
+   p7ú
+   À›Á   0×	   ğ›Á   @İú
+   àEú
+   @Fú
+   7ú
+   €6ú
+   ÈÉú
+   0·ú
+   p$”   pwb   àe'	   °¯   p„™   Ğ¯š   poî	   çr	   0×	   ¨.ú
+   p]š   p]š   p]š   Ğ×K   ÈÉú
+   p]š   ¨.ú
+    œÁ   PœÁ   ÀC   €œÁ   ÀC   ÀC   °œÁ   °9ú
+   ¨.ú
+   ¨.ú
+   àœÁ   @İú
+   p7ú
+   @İú
+   Á   À|Á   p7ú
+   @Á   Ğ¯V	   P6ú
+   €6ú
+   ¨.ú
+   @İú
+   @İú
+   @İú
+   @İú
+   À|Á   Ğ¯V	   @İú
+   ¨.ú
+   pÁ   ÀC    Á   ÀC   °9ú
+   ÀC   ÀC   ¨.ú
+   ¨.ú
+   ĞÁ   pn	   p7ú
+   pn	    Á   €ºL   p7ú
+   0Á   0ï
+   P6ú
+   `Á   ĞˆÁ   €6ú
+   ĞˆÁ   ĞˆÁ   ĞˆÁ   ¨.ú
+   pn	   pn	   pn	   pn	   €ºL   0ï
+   ĞˆÁ   pn	   Á   pn	   p7ú
+   pn	   ÀÁ   0‹b   p7ú
+   ğÁ   0ï
+   P6ú
+    ŸÁ   ğÆú
+   €6ú
+   ğÆú
+   ğÆú
+   ğÆú
+   ¨.ú
+   pn	   pn	   pn	   pn	   0‹b   0ï
+   ğÆú
+   pn	   PŸÁ   €ŸÁ   @İú
+   p7ú
+   @İú
+   °ŸÁ   À|Á   àŸÁ   @İú
+    Á   @ Á   °9ú
+   ¨.ú
+   ¨.ú
+   p Á   pn	   p7ú
+   pn	   °y×   05”   p7ú
+     Á   0ï
+   P6ú
+   Ğ Á   pË		   p7ú
+   pË		    ¡Á   X!ğ
+   P6ú
+   0¡Á   @İú
+   p7ú
+   @İú
+   `¡Á   À|Á   €6ú
+   @İú
+   @İú
+   €6ú
+   pË		   pË		   ¨.ú
+   pn	   pn	   pn	   pn	   05”   0ï
+   pË		   pn	   ¨.ú
+   ¡Á   @İú
+   °9ú
+   ¨.ú
+   ¨.ú
+   À¡Á   pn	   p7ú
+   pn	   ğy×   05”   p7ú
+   ğ¡Á   0ï
+   P6ú
+    ¢Á   €6ú
+   ¨.ú
+   pn	   pn	   pn	   pn	   05”   0ï
+   pn	   ¨.ú
+   P¢Á   pn	   p7ú
+   pn	   €¢Á   0¿b   p7ú
+   °¢Á   0ï
+   P6ú
+   à¢Á   px×   €6ú
+   px×   px×   px×   ¨.ú
+   pn	   pn	   pn	   pn	   0¿b   0ï
+   px×   pn	   £Á   pn	   p7ú
+   pn	   @£Á   0ªL   p7ú
+   p£Á   0ï
+   P6ú
+    £Á    „Á   €6ú
+    „Á    „Á    „Á   ¨.ú
+   pn	   pn	   pn	   pn	   0ªL   0ï
+    „Á   pn	   ¨.ú
+   Ğ£Á   ÀC    ¤Á   @İú
+   p7ú
+   0¤Á   À|Á   ¨.ú
+   @İú
+   ¨.ú
+   `¤Á   ¤Á   0z×   P6ú
+   À¤Á   @İú
+   7ú
+   ğ¤Á   x«ú
+   °9ú
+    ¥Á   pŠ	   à?ú
+   P¥Á   àëú
+   à?ú
+   €¥Á   ğù   @@ú
+   ğù   ğù   @@ú
+   àëú
+   àëú
+   7ú
+   pŠ	   °¥Á   °«ú
+   °9ú
+   à¥Á   pŠ	   à?ú
+   ¦Á   ğù   @@ú
+   ğù   ğù   7ú
+   pŠ	   @¦Á   pêú
+   °9ú
+   p¦Á   pŠ	   à?ú
+    ¦Á   °±	   @@ú
+   °±	   °±	   7ú
+   pŠ	   €6ú
+   @İú
+   x«ú
+   °«ú
+   pêú
+   @İú
+   x«ú
+   °«ú
+   pêú
+   @İú
+   x«ú
+   °«ú
+   pêú
+   @İú
+   x«ú
+   °«ú
+   pêú
+   Ğ¦Á    §Á   °9ú
+   ¨.ú
+   ¨.ú
+    Ë    Ë   ¨.ú
+   0§Á   `§Á   @İú
+   p7ú
+   @İú
+   §Á   À|Á   À§Á   @İú
+   ğ§Á   °9ú
+   ¨.ú
+   ¨.ú
+    ¨Á   ¨.ú
+   ¨.ú
+   P¨Á   @İú
+   €¨Á   x«ú
+   °¨Á   x«ú
+   x«ú
+   à¨Á   ©Á   °9ú
+   ¨.ú
+   ¨.ú
+   @©Á    Yô
+   @:ú
+    Yô
+    Yô
+   àÅ   `àÅ   P6ú
+   p©Á   °«ú
+   7ú
+   °«ú
+   °«ú
+   °«ú
+    ©Á   @İú
+   p7ú
+   @İú
+   pz×   °tb   €6ú
+   @İú
+   ¨.ú
+   `àÅ   `àÅ   `àÅ   °«ú
+   `àÅ   Ğ©Á   @İú
+   p7ú
+   @İú
+    ªÁ   À|Á   p7ú
+   0ªÁ   ¨©ú
+   P6ú
+   `ªÁ   pØ÷
+   @:ú
+   pØ÷
+   pØ÷
+   pØ÷
+   pØ÷
+   ªÁ    Yô
+   €6ú
+    Yô
+   pØ÷
+   ¨.ú
+   @İú
+   @İú
+   @İú
+   @İú
+   À|Á   ¨©ú
+   pØ÷
+   @İú
+   ¨.ú
+   ÀªÁ   x«ú
+   ğªÁ   @İú
+   p7ú
+   @İú
+    «Á   ~Á   P«Á   @İú
+   €«Á   °«Á   °9ú
+   ¨.ú
+   ¨.ú
+   à«Á   ÀC   @:ú
+   ÀC   ÀC   ¬Á   P1]	   p7ú
+   °z×   °k   P6ú
+   @¬Á   @İú
+   p7ú
+   @İú
+   p¬Á   ~Á   €6ú
+   @İú
+   @İú
+   ¨.ú
+   P1]	   P1]	   P1]	   °k   @İú
+   P1]	    ¬Á   Ğ¬Á   ÀC    ­Á   ÀC   ÀC   0­Á   `­Á   ­Á   @İú
+   p7ú
+   À­Á   ps×   °9ú
+   @İú
+   ¨.ú
+   ¨.ú
+   ğ­Á   @İú
+   p7ú
+   @İú
+    ®Á   À|Á   p7ú
+   P®Á   àÖr	   P6ú
+   €6ú
+   ¨.ú
+   @İú
+   @İú
+   @İú
+   @İú
+   À|Á   àÖr	   @İú
+   ¨.ú
+   ğz×   ÀC   pŒ   P6ú
+   pŒ   €®Á   @İú
+   p7ú
+   @İú
+   °®Á   ~Á   €6ú
+   @İú
+   @İú
+   ¨.ú
+   pŒ   pŒ   pŒ   pŒ   @İú
+   pŒ   ¨.ú
+   à®Á   @İú
+   °9ú
+   ¨.ú
+   ¨.ú
+   ¯Á   hîú
+   p7ú
+   hîú
+   @¯Á   Øğ
+   P6ú
+   °àÅ   rÊ   7ú
+   p¯Á   ÀÏù
+   €6ú
+   ÀÏù
+   ÀÏù
+   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+   ¨.ú
+    ¯Á   Ğ¯Á   Pnú
+   P6ú
+    °Á   @İú
+   €6ú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   0°Á   `°Á   p]š   p7ú
+   °Á   Ğ×K   °9ú
+   p]š   ¨.ú
+   ¨.ú
+   °[Æ   @¹¯   ¨.ú
+   À°Á   ğ°Á   @İú
+   p7ú
+    ±Á   Ÿî
+   P6ú
+   €6ú
+   ¨.ú
+   @İú
+   ¨.ú
+   P±Á   €±Á   ¸nú
+   P6ú
+   °±Á   @İú
+   7ú
+   à±Á   x«ú
+   °9ú
+   ²Á   pŠ	   à?ú
+   @²Á   àëú
+   à?ú
+   p²Á   ğù   @@ú
+   ğù   ğù   @@ú
+   àëú
+   àëú
+   @:ú
+   pŠ	   x«ú
+   @İú
+   x«ú
+   x«ú
+   @İú
+   x«ú
+   x«ú
+   x«ú
+    ²Á   7ú
+   Ğ²Á   °«ú
+   °9ú
+    ³Á   pŠ	   à?ú
+   0³Á   ğù   @@ú
+   ğù   ğù   @:ú
+   pŠ	   `³Á   7ú
+   ³Á   pêú
+   °9ú
+   À³Á   pŠ	   à?ú
+   ğ³Á   °±	   @@ú
+   °±	   °±	   @:ú
+   pŠ	    ´Á   7ú
+   €6ú
+   @İú
+   x«ú
+   x«ú
+   x«ú
+   °«ú
+   pêú
+   @İú
+   x«ú
+   x«ú
+   x«ú
+   °«ú
+   pêú
+   P´Á   €´Á   °9ú
+   ¨.ú
+   ¨.ú
+    ö¼    ø¼   ¨.ú
+   °´Á   @İú
+   p7ú
+   @İú
+   à´Á   0z×   P6ú
+   µÁ   x«ú
+   7ú
+   x«ú
+   x«ú
+   x«ú
+   @µÁ   °«ú
+   7ú
+   °«ú
+   °«ú
+   pµÁ   pêú
+   €6ú
+   pêú
+   pêú
+   ¨.ú
+   @İú
+   @İú
+   @İú
+   @İú
+   0z×   x«ú
+   @İú
+   ¨.ú
+    µÁ   ĞµÁ    ¶Á   hfú
+   P6ú
+   0¶Á   @İú
+   €6ú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   @İú
+   `¶Á   ¶Á   p]š   p7ú
+   À¶Á   Ğ×K   °9ú
+   p]š   ¨.ú
+   ¨.ú
+    ‰È   pˆÈ   ¨.ú
+   ğ¶Á    >ÿ   @:ú
+    >ÿ    >ÿ    ·Á   ğ6m   P6ú
+   €6ú
+   ¨.ú
+   ğ6m   ğ6m   ğ6m   ğ6m   P·Á    ô
+   @:ú
+    ô
+    ô
+   €·Á   °·Á   ğÚª   p7ú
+   à·Á   pNÓ   P6ú
+   ¸Á    >ÿ   7ú
+    >ÿ    >ÿ    >ÿ   @¸Á   @İú
+   p7ú
+   @İú
+   p¸Á   Ÿî
+   €6ú
+   @İú
+   ¨.ú
+   ğÚª   p{×   pŒ   P6ú
+   pŒ   °{×   ğ‹   P6ú
+   ğ‹    ¸Á    >ÿ   €6ú
+    >ÿ    >ÿ    >ÿ   €6ú
+   ğ‹   ğ‹   ¨.ú
+   pŒ   pŒ   pŒ   pŒ   ğ‹   pŒ   Ğ¸Á    ¹Á    ô
+   ¨.ú
+    ô
+   ¨.ú
+   0¹Á   `¹Á   ¹Á    fú
+   P6ú
+   À¹Á   @İú
+   7ú
+   ğ¹Á   x«ú
+   °9ú
+    ºÁ   pŠ	   à?ú
+   PºÁ   àëú
+   à?ú
+   €ºÁ   ğù   @@ú
+   ğù   ğù   @@ú
+   àëú
+   àëú
+   @:ú
+   pŠ	   x«ú
+   @İú
+   x«ú
+   x«ú
+   @İú
+   x«ú
+   x«ú
+   x«ú
+   °ºÁ   7ú
+   àºÁ   °«ú
+   °9ú
+   »Á   pŠ	   à?ú
+   @»Á   ğù   @@ú
+   ğù   ğù   @:ú
+   pŠ	   p»Á   7ú
+    »Á   pêú
+   °9ú
+   Ğ»Á   pŠ	   à?ú
+    ¼Á   °±	   @@ú
+   °±	   °±	   @:ú
+   pŠ	   0¼Á   7ú
+   €6ú
+   @İú
+   x«ú
+   x«ú
+   x«ú
+   °«ú
+   pêú
+   @İú
+   x«ú
+   x«ú
+   x«ú
+   °«ú
+   pêú
+   `¼Á   ¼Á   °9ú
+   ¨.ú
+   ¨.ú
+   `ó¼   °ô¼   ¨.ú
+   À¼Á    >ÿ   @:ú
+    >ÿ    >ÿ   ğ¼Á   ğ6m   P6ú
+   €6ú
+   ¨.ú
+   ğ6m   ğ6m   ğ6m   ğ6m    ½Á   P½Á   x«ú
+   €½Á   x«ú
+   x«ú
+   °½Á   à½Á   °9ú
+   ¨.ú
+   ¨.ú
+   ¾Á   @¾Á   `¤V	   p7ú
+   p¾Á    ãK   P6ú
+    ¾Á   ğÚª   p7ú
+   ğÚª   Ğ¾Á   pNÓ   P6ú
+    ¿Á    >ÿ   7ú
+    >ÿ    >ÿ    >ÿ   0¿Á   @İú
+   p7ú
+   @İú
+   `¿Á   0z×   7ú
+   @İú
+   ¿Á   x«ú
+   7ú
+   x«ú
+   x«ú
+   À¿Á   °«ú
+   7ú
+   °«ú
+   °«ú
+   0ÀÁ   pêú
+   €6ú
+   pêú
+   pêú
+   €6ú
+   ğÚª   ğÚª   ¨.ú
+   `¤V	   ¨.ú
+   `ÀÁ   x«ú
+   °9ú
+   ¨.ú
+   ¨.ú
+   ÀÁ   ÀÀÁ   ğÚª   p7ú
+   ğÀÁ   pNÓ   P6ú
+    ÁÁ    >ÿ   7ú
+    >ÿ    >ÿ    >ÿ   PÁÁ   @İú
+   p7ú
+   @İú
+   €ÁÁ   0z×   7ú
+   @İú
+   °ÁÁ   x«ú
+   7ú
+   x«ú
+   x«ú
+   àÁÁ   °«ú
+   7ú
+   °«ú
+   °«ú
+   ÂÁ   pêú
+   €6ú
+   pêú
+   pêú
+   ¨.ú
+   ğÚª   ¨.ú
+   ğ{×   pŒ   P6ú
+   pŒ   0|×   ğ‹   P6ú
+   ğ‹   @ÂÁ    >ÿ   €6ú
+    >ÿ    >ÿ    >ÿ   €6ú
+   ğ‹   ğ‹   ¨.ú
+   pŒ   pŒ   pŒ   pŒ   ğ‹   pŒ   ¨.ú
+   ¨.ú
+   pÂÁ   0{×   ğx×   P6ú
+    ÂÁ   °¯   °9ú
+   ĞÂÁ   pŠ	   à?ú
+    ÃÁ   4ï
+   @@ú
+   4ï
+   4ï
+   €6ú
+   pŠ	   °¯   °¯   °¯   °¯   °¯   °¯   °¯   °¯   °¯   0ÃÁ   `ÃÁ   pŠ	   à?ú
+   ÃÁ   4ï
+   @@ú
+   4ï
+   4ï
+   °9ú
+   pŠ	   ¨.ú
+   ¨.ú
+   ÀÃÁ   ğÃÁ   °¯   °9ú
+   °¯   °¯   ¨.ú
+   ¨.ú
+    ÄÁ   PÄÁ   °¯   ¨.ú
+   °¯   ¨.ú
+   €ÄÁ   °¯   °ÄÁ   @:ú
+   °ÄÁ   °ÄÁ   p|×   ğ]š   P6ú
+   €6ú
+   ¨.ú
+   ğ]š   ğ]š   ğ]š   ğ]š   àÄÁ   P6ú
+   ÅÁ   pn	   p7ú
+   pn	   @ÅÁ   0¿b   p7ú
+   pÅÁ   È³ú
+   P6ú
+   €6ú
+    ÅÁ   pn	   P6ú
+   ĞÅÁ   °ÄÁ   p7ú
+   °ÄÁ    ÆÁ   °[k   0ÆÁ   °ÄÁ   `ÆÁ   °ÄÁ   ÆÁ   °ÄÁ   ÀÆÁ   €6ú
+   °ÄÁ   ğÆÁ   °ÄÁ   °ÄÁ    ÇÁ   pn	   p7ú
+   °|×   0Œb   PÇÁ   pn	   €ÇÁ   P1]	   p7ú
+   ğ|×   ğ[k   P6ú
+   €6ú
+   €6ú
+   P1]	   pn	   ¨.ú
+   pn	   pn	   ¨.ú
+   °ÇÁ   àÇÁ   0}×   P6ú
+   ÈÁ   p}×   °9ú
+   @ÈÁ   È)ï
+   €6ú
+   È)ï
+   p}×   p}×   p}×   p}×   p}×   p}×   p}×   p}×   p}×   pÈÁ    ÈÁ   ğÛı   °9ú
+   ğÛı   ¨.ú
+   ¨.ú
+   àn½C‹  0H¼C‹  ¨.ú
+   ĞÈÁ   °9ú
+   ¨.ú
+   ¨.ú
+    ÉÁ   0ÉÁ   p7º   p7ú
+   `ÉÁ   0~     Æ[   ÉÁ   p7º   ÀÉÁ   ğ´   7ú
+   ğÉÁ   páı   ¨.ú
+    ÊÁ   PÊÁ   p7º   p7ú
+   €ÊÁ   0~     Æ[   p7ú
+   °ÊÁ   P1]	   °V   àÊÁ   p7º   ËÁ   `ÆÁ   7ú
+   @ËÁ    Uî	   ¨.ú
+   ¨.ú
+   pËÁ    ËÁ   hÓî
+   ĞËÁ   hÓî
+   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+    ÌÁ   0ÌÁ   hÓî
+   P6ú
+   prÊ   ĞrÊ   0sÊ   sÊ   €6ú
+   ğ\Æ   `ÌÁ   hÓî
+   ÀAú
+   ğû
+   ¨.ú
+   ğû
+   ¨.ú
+   ÌÁ   ÀÌÁ   °}×   ğ_Ë   P6ú
+   ğÌÁ   p}×   €6ú
+   p}×   p}×   p}×   °9ú
+   ğ_Ë   ¨.ú
+   ¨.ú
+    ÍÁ   °9ú
+   ¨.ú
+   ¨.ú
+   PÍÁ   °ÍÁ   @:ú
+   °ÍÁ   °ÍÁ   àÍÁ   0äø   p7ú
+   @ÎÁ   0A,	   P6ú
+   pÎÁ   p}×   €6ú
+   p}×   p}×   p}×   ¨.ú
+   0äø   0äø   0äø   0A,	   p}×   0äø   ¨.ú
+    ÎÁ   ĞÎÁ   ûï
+   °9ú
+   ûï
+   ¨.ú
+   ¨.ú
+    ÏÁ   °ÍÁ   @:ú
+   °ÍÁ   °ÍÁ   ğ}×   0~×   ¨.ú
+   ¨.ú
+   0ÏÁ   `ÏÁ   ÀIñ
+   P6ú
+   ÏÁ   ğsÊ   PtÊ   05ú
+   °tÊ   ÀÏÁ   p~×    áÅ   àEú
+   ğÏÁ   p}×   @Fú
+   p}×    ĞÁ   °~×   àEú
+   PĞÁ   °ÍÁ   @Fú
+   °ÍÁ   05ú
+   PáÅ   ğ~×   €6ú
+   0µÇ   ¨.ú
+   ÀIñ
+   ¨.ú
+   €ĞÁ   0×   p×   P6ú
+   °ĞÁ   páı   €6ú
+   páı   páı   °9ú
+   ¨.ú
+   ¨.ú
+   À‡È   0LÏ   ¨.ú
+   àĞÁ   ÑÁ   `tú
+   P6ú
+   @ÑÁ   @İú
+   7ú
+   pÑÁ    ³ú
+   °9ú
+    ÑÁ   È)ï
+   7ú
+   È)ï
+   ĞÑÁ   `@n   °9ú
+    ÒÁ   pŠ	   à?ú
+   0ÒÁ   È)ï
+   à?ú
+   `ÒÁ   7ú
+   ÒÁ   À&ï
+   à?ú
+   ÀÒÁ    Uî	   @@ú
+    Uî	    Uî	   @@ú
+   À&ï
+   À&ï
+   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	   `@n   @İú
+    ³ú
+   `@n   `@n   @İú
+    ³ú
+   `@n   `@n   `@n   ğÒÁ   7ú
+   €6ú
+   @İú
+    ³ú
+   `@n   `@n   `@n   @İú
+    ³ú
+   `@n   `@n   `@n   PÓÁ   €ÓÁ   °9ú
+   ¨.ú
+   ¨.ú
+   °ÓÁ   0[	   °9ú
+   àÓÁ   pŠ	   à?ú
+   ÔÁ   È)ï
+   à?ú
+   à?ú
+   @ÔÁ   `ÆÁ   @@ú
+   `ÆÁ   `ÆÁ   7ú
+   `ÆÁ   pÔÁ    Uî	   @@ú
+    Uî	    Uî	   @@ú
+   È)ï
+   È)ï
+   @:ú
+   pŠ	    ÔÁ   ¨.ú
+   ĞÔÁ   °×   @:ú
+   °×   °×    ÕÁ   @İú
+   p7ú
+   0ÕÁ   0€×   P6ú
+   `ÕÁ   `@n   €6ú
+   `@n   `@n   `@n   ¨.ú
+   @İú
+   @İú
+   @İú
+   0€×   `@n   @İú
+   ÕÁ   ÀÕÁ   ğ'	   P6ú
+   ğ'	   ğÕÁ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   °9ú
+   ğ'	   ¨.ú
+   ¨.ú
+    ÖÁ   PÖÁ   °×   €ÖÁ   °×   °×   °ÖÁ   àÖÁ   °9ú
+   ¨.ú
+   ¨.ú
+   ×Á   @×Á   ˆIñ
+   P6ú
+   uÊ   À>Î   puÊ   0?Î   p€×    áÅ   €6ú
+   ğ@Ï   ¨.ú
+   ˆIñ
+   ¨.ú
+   p×Á   °×   0[	   @:ú
+   0[	   0[	    ×Á    ğ   P6ú
+   Ğ×Á   È)ï
+   à?ú
+   È)ï
+   à?ú
+    ØÁ   `ÆÁ   @@ú
+   `ÆÁ   `ÆÁ   7ú
+   `ÆÁ   0ØÁ    Uî	   @@ú
+    Uî	    Uî	   7ú
+   È)ï
+   È)ï
+   `ØÁ   @İú
+   p7ú
+   @İú
+   ØÁ   0€×   P6ú
+   ÀØÁ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   €6ú
+   @İú
+   ¨.ú
+    ğ    ğ    ğ   È)ï
+    ğ   ¨.ú
+   ğØÁ   °€×   ğ_Ë   P6ú
+   ğ_Ë    ÙÁ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   °9ú
+   ğ_Ë   ¨.ú
+   ¨.ú
+   PÙÁ   0[	   @:ú
+   0[	   0[	   €ÙÁ    ğ   P6ú
+   °ÙÁ   È)ï
+   à?ú
+   È)ï
+   à?ú
+   àÙÁ   `ÆÁ   @@ú
+   `ÆÁ   `ÆÁ   7ú
+   `ÆÁ   ÚÁ    Uî	   @@ú
+    Uî	    Uî	   7ú
+   È)ï
+   È)ï
+   @ÚÁ   @İú
+   p7ú
+   @İú
+   pÚÁ   ğ€×   P6ú
+    ÚÁ    ³ú
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+   €6ú
+   @İú
+   ¨.ú
+    ğ    ğ    ğ   È)ï
+    ğ   ¨.ú
+   ĞÚÁ   ğ_Ë    ÛÁ   0[	   0ÛÁ   0[	   0[	   `ÛÁ   °9ú
+   ¨.ú
+   ¨.ú
+   ÛÁ   ÀÛÁ   ÀIñ
+   P6ú
+   ğÛÁ   àEú
+    ÜÁ   @İú
+   p7ú
+   PÜÁ   Xjú
+   p7ú
+   €ÜÁ   (zú
+   @Fú
+   @İú
+   0×   ğáÅ   05ú
+   @âÅ   p×   °×   °ÜÁ   ğ×   âÅ   àEú
+   àÜÁ    ³ú
+   @Fú
+    ³ú
+   05ú
+   àâÅ   €6ú
+   0À×   ¨.ú
+   ÀIñ
+   ¨.ú
+   İÁ   0[	    ğ
+   P6ú
+    ğ
+   €6ú
+   p7ú
+   @İÁ   `tú
+   P6ú
+   pİÁ   0[	   7ú
+   0[	   0[	   0[	    İÁ    ğ   P6ú
+    ğ   ĞİÁ   pŠ	   à?ú
+   pŠ	    ŞÁ   È)ï
+   à?ú
+   à?ú
+   0ŞÁ   `ÆÁ   @@ú
+   `ÆÁ   `ÆÁ   7ú
+   `ÆÁ   `ŞÁ   À&ï
+   à?ú
+   ŞÁ    Uî	   @@ú
+    Uî	    Uî	   @@ú
+   À&ï
+   À&ï
+   @@ú
+   È)ï
+   È)ï
+   7ú
+   pŠ	   pŠ	   ÀŞÁ   °×   7ú
+   °×   °×   €6ú
+   7ú
+    ğ   €6ú
+   ¨.ú
+    ğ
+    ğ
+    ğ
+    ğ
+   `tú
+   0[	    ğ
+   ¨.ú
+   Ğ:ú
+   ğŞÁ   hâî
+   ¨.ú
+   hâî
+   hâî
+    ßÁ   PßÁ   ğ€×   P6ú
+   €ßÁ    ³ú
+   °9ú
+   °ßÁ   È)ï
+   à?ú
+   àßÁ   7ú
+   àÁ    Uî	   @@ú
+    Uî	    Uî	   7ú
+   È)ï
+   €6ú
+    ³ú
+    ³ú
+    ³ú
+    ³ú
+   @àÁ   pàÁ   È)ï
+   à?ú
+   à?ú
+    àÁ   `ÆÁ   7ú
+   `ÆÁ   `ÆÁ   ĞàÁ   ğ´   @@ú
+   ğ´   ğ´   7ú
+   `ÆÁ   ğ´    áÁ    Uî	   @@ú
+    Uî	    Uî	   °9ú
+   È)ï
+   ¨.ú
+   ¨.ú
+   ĞuÊ   0vÊ   ¨.ú
+   0áÁ   `áÁ   0‚×   P6ú
+   áÁ   Ğ¯š   °9ú
+   ÀáÁ   H¥ú
+   7ú
+   H¥ú
+   ğáÁ   Pıø   °9ú
+    âÁ   ğ´   €6ú
+   ğ´   Pıø   Ğ¯š   Pıø   Pıø   Ğ¯š   Pıø   Pıø   Ğ¯š   Pıø   Pıø   Ğ¯š   Pıø   Pıø   PâÁ   €âÁ    j	   °9ú
+    j	   ¨.ú
+   ¨.ú
+   °âÁ   °¬   @:ú
+   °¬   °¬   àâÁ   p]š   p7ú
+   ãÁ   Ğ×K   p7ú
+   p‚×   °ü’   P6ú
+   @ãÁ    ğ   P6ú
+    ğ   pãÁ   H¥ú
+   7ú
+   H¥ú
+   H¥ú
+   H¥ú
+    ãÁ   Pıø   €6ú
+   Pıø   Pıø   €6ú
+    ğ    ğ   ¨.ú
+   p]š   p]š   p]š   Ğ×K   °ü’    ğ   p]š   ĞãÁ    äÁ    ³ú
+   P6ú
+   0äÁ   `äÁ   Ğ¯š   7ú
+   Ğ¯š   äÁ   ğ»Å   @:ú
+   àEú
+   ÀäÁ   °‚×   °9ú
+   ğäÁ   °¬   @Fú
+   °¬   €6ú
+   ¨.ú
+    ³ú
+   ¨.ú
+    åÁ   PåÁ    ğ   P6ú
+   €åÁ   È)ï
+   à?ú
+   È)ï
+   à?ú
+   °åÁ   `ÆÁ   7ú
+   `ÆÁ   `ÆÁ   àåÁ   ğ´   @@ú
+   ğ´   ğ´   7ú
+   `ÆÁ   ğ´   æÁ    Uî	   @@ú
+    Uî	    Uî	   7ú
+   È)ï
+   È)ï
+   @æÁ   0‚×   €6ú
+   0‚×   0‚×   ¨.ú
+    ğ   ¨.ú
+   Ğ:ú
+   pæÁ   hâî
+   ¨.ú
+   hâî
+   hâî
+    æÁ   ĞæÁ   0€×   P6ú
+    çÁ   `@n   °9ú
+   0çÁ   pŠ	   à?ú
+   `çÁ   È)ï
+   à?ú
+   çÁ   7ú
+   ÀçÁ   À&ï
+   à?ú
+   ğçÁ    Uî	   @@ú
+    Uî	    Uî	   @@ú
+   À&ï
+   À&ï
+   @@ú
+   È)ï
+   È)ï
+   7ú
+   pŠ	   €6ú
+   `@n   `@n   `@n   `@n    èÁ   PèÁ   pŠ	   à?ú
+   €èÁ   È)ï
+   à?ú
+   à?ú
+   °èÁ   `ÆÁ   7ú
+   `ÆÁ   `ÆÁ   àèÁ   ğ´   @@ú
+   ğ´   ğ´   7ú
+   `ÆÁ   ğ´   éÁ   À&ï
+   à?ú
+   @éÁ    Uî	   @@ú
+    Uî	    Uî	   @@ú
+   À&ï
+   À&ï
+   @@ú
+   È)ï
+   È)ï
+   °9ú
+   pŠ	   ¨.ú
+   ¨.ú
+   vÊ   ğvÊ   ¨.ú
+   péÁ    éÁ   `@n   ĞéÁ   `@n   `@n    êÁ   °9ú
+   ¨.ú
+   ¨.ú
+   0êÁ   `êÁ   ¨.ú
+   ¨.ú
+   êÁ   `@n   ÀêÁ   ğ‚×   ğ_Ë   P6ú
+   ğêÁ   `@n   €6ú
+   `@n   `@n   `@n   °9ú
+   ğ_Ë   ¨.ú
+   ¨.ú
+    ëÁ   PëÁ   ÀIñ
+   P6ú
+   PwÊ    À×   €ëÁ   0ƒ×   0ãÅ   àEú
+   °ëÁ   `@n   @Fú
+   `@n   05ú
+   €ãÅ   €6ú
+   £Î   ¨.ú
+   ÀIñ
+   ¨.ú
+   àëÁ   ìÁ   @:ú
+   ìÁ   ìÁ   @ìÁ    ğ   P6ú
+   pìÁ   È)ï
+   à?ú
+   È)ï
+    ìÁ   7ú
+   ĞìÁ   À&ï
+   à?ú
+    íÁ    Uî	   @@ú
+    Uî	    Uî	   @@ú
+   À&ï
+   À&ï
+   7ú
+   È)ï
+   È)ï
+   0íÁ   `@n   €6ú
+   `@n   `@n   ¨.ú
+    ğ    ğ    ğ   È)ï
+    ğ   `íÁ   íÁ   ÀíÁ   pƒ×   P6ú
+   ğíÁ   Ğ¯š   °9ú
+    îÁ   H¥ú
+   7ú
+   H¥ú
+   PîÁ   Pıø   °9ú
+   €îÁ   ğ´   €6ú
+   ğ´   Pıø   Ğ¯š   Pıø   Pıø   Ğ¯š   Pıø   Pıø   Ğ¯š   Pıø   Pıø   Ğ¯š   Pıø   Pıø   °îÁ   àîÁ    j	   °9ú
+    j	   ¨.ú
+   ¨.ú
+   ïÁ   °¬   @:ú
+   °¬   °¬   @ïÁ   p]š   p7ú
+   pïÁ   Ğ×K   p7ú
+   °ƒ×   °ü’   P6ú
+    ïÁ    ğ   P6ú
+    ğ   ĞïÁ   H¥ú
+   7ú
+   H¥ú
+   H¥ú
+   H¥ú
+    ğÁ   Pıø   €6ú
+   Pıø   Pıø   €6ú
+    ğ    ğ   ¨.ú
+   p]š   p]š   p]š   Ğ×K   °ü’    ğ   p]š   0ğÁ   `ğÁ   ğÁ   ìÁ   P6ú
+   ÀğÁ   ğğÁ   Ğ¯š   7ú
+   Ğ¯š    ñÁ   ğ»Å   @:ú
+   àEú
+   PñÁ   ğƒ×   °9ú
+   €ñÁ   °¬   @Fú
+   °¬   €6ú
+   ¨.ú
+   ìÁ   ¨.ú
+   °ñÁ   àñÁ    ğ   P6ú
+   òÁ   È)ï
+   à?ú
+   È)ï
+   à?ú
+   @òÁ   `ÆÁ   7ú
+   `ÆÁ   `ÆÁ   pòÁ   ğ´   @@ú
+   ğ´   ğ´   7ú
+   `ÆÁ   ğ´    òÁ   À&ï
+   à?ú
+   ĞòÁ    Uî	   @@ú
+    Uî	    Uî	   @@ú
+   À&ï
+   À&ï
+   7ú
+   È)ï
+   È)ï
+    óÁ   pƒ×   €6ú
+   pƒ×   pƒ×   ¨.ú
+    ğ   ¨.ú
+   ¨.ú
+   0óÁ   0„×   p×   P6ú
+   `óÁ   p}×   €6ú
+   p}×   p}×   p}×   ¨.ú
+   p×   ¨.ú
+   p„×   0@Å   @:ú
+   0@Å   0@Å   àEú
+   óÁ   ÀóÁ   7ú
+   ğóÁ    ôÁ   7ú
+   €ôÁ   °ôÁ   7ú
+   àôÁ   °„×   7ú
+   õÁ   ğ„×   7ú
+   @õÁ   põÁ   7ú
+    õÁ   ĞõÁ   7ú
+   @Fú
+   ¨.ú
+    öÁ   0…×   p…×   P6ú
+   0öÁ   ğö	   7ú
+   ğö	   ğö	   `öÁ    y	   @:ú
+    y	    y	    y	   öÁ   €6ú
+    y	   °9ú
+   ¨.ú
+   ¨.ú
+   °wÊ   xÊ   ¨.ú
+   ÀöÁ   À|Á   °9ú
+   ğöÁ   pŠ	   à?ú
+    ÷Á   p]š   p7ú
+   P÷Á   Ğ×K   @@ú
+   p]š   p]š   ¨.ú
+   pŠ	   €÷Á   °¯   °9ú
+   °÷Á   pŠ	   à?ú
+   à÷Á   4ï
+   @@ú
+   4ï
+   4ï
+   ¨.ú
+   pŠ	   øÁ   °…×   °9ú
+   @øÁ   pŠ	   à?ú
+   pøÁ   4ï
+   @@ú
+   4ï
+   4ï
+   ¨.ú
+   pŠ	    øÁ   °v×   °9ú
+   ĞøÁ   pŠ	   à?ú
+    ùÁ   H¥ú
+   à?ú
+   0ùÁ   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+   `ùÁ    j	   @@ú
+    j	    j	   @@ú
+   H¥ú
+   H¥ú
+   ¨.ú
+   pŠ	   ùÁ   pv×   °9ú
+   ÀùÁ   pŠ	   à?ú
+   ğùÁ   Ø—î
+   à?ú
+    úÁ   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   Ø—î
+   Ø—î
+   ¨.ú
+   pŠ	   PúÁ   0»Å   °9ú
+   €úÁ   pŠ	   à?ú
+   °úÁ   È)ï
+   à?ú
+   à?ú
+   àúÁ   p]š   p7ú
+   p]š   ûÁ   Ğ×K   @@ú
+   p]š   7ú
+   p]š   @ûÁ    j	   @@ú
+    j	    j	   @@ú
+   È)ï
+   È)ï
+   ¨.ú
+   pŠ	    ûÁ   ĞéY   °9ú
+   ĞûÁ   pŠ	   à?ú
+    üÁ   È)ï
+   à?ú
+   à?ú
+   0üÁ   p]š   p7ú
+   p]š   `üÁ   Ğ×K   @@ú
+   p]š   7ú
+   p]š   üÁ    j	   @@ú
+    j	    j	   @@ú
+   È)ï
+   È)ï
+   ¨.ú
+   pŠ	   ÀüÁ   X¡ú
+   °9ú
+   ğüÁ   °6m   p7ú
+    ıÁ   Ğæ™	   ¨.ú
+   °6m   ğ…×   0†×   °9ú
+   PıÁ   pŠ	   à?ú
+   €ıÁ   à®ğ
+   @@ú
+   à®ğ
+   à®ğ
+   ¨.ú
+   pŠ	   °ıÁ   ÀC   °9ú
+   àıÁ   pŠ	   à?ú
+   şÁ   à®ğ
+   @@ú
+   à®ğ
+   à®ğ
+   ¨.ú
+   pŠ	   p†×   °tb   °9ú
+   @şÁ   pŠ	   à?ú
+    şÁ   Ø¶î
+   à?ú
+   ĞşÁ   àëú
+   à?ú
+    ÿÁ   ğù   @@ú
+   ğù   ğù   7ú
+   àëú
+   àëú
+   àëú
+   0ÿÁ   @@ú
+   @@ú
+   Ø¶î
+   Ø¶î
+   ¨.ú
+   pŠ	   ¨.ú
+   `ÿÁ   ÿÁ   0DÅ   P6ú
+   ÀÿÁ   ğö	   7ú
+   ğö	   ğö	   0@Â    y	   @:ú
+    y	    y	    y	   `@Â   €6ú
+    y	   °9ú
+   ¨.ú
+   ¨.ú
+   pxÊ   ĞxÊ   ¨.ú
+   @Â   pDÅ   °9ú
+   À@Â   pŠ	   à?ú
+   ğ@Â   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   ¨.ú
+   pŠ	    AÂ   ÈÉú
+   °9ú
+   PAÂ   pŠ	   à?ú
+   €AÂ   4ï
+   @@ú
+   4ï
+   4ï
+   ¨.ú
+   pŠ	   °AÂ   ğÆú
+   °9ú
+   àAÂ   pŠ	   à?ú
+   BÂ   H¥ú
+   à?ú
+   @BÂ   4ï
+   7ú
+   4ï
+   4ï
+   4ï
+   pBÂ    j	   @@ú
+    j	    j	   @@ú
+   H¥ú
+   H¥ú
+   ¨.ú
+   pŠ	    BÂ   poî	   °9ú
+   ĞBÂ   pŠ	   à?ú
+    CÂ   Ø—î
+   à?ú
+   0CÂ   4ï
+   @@ú
+   4ï
+   4ï
+   @@ú
+   Ø—î
+   Ø—î
+   ¨.ú
+   pŠ	   `CÂ   çr	   °9ú
+   CÂ   pŠ	   à?ú
+   ÀCÂ   °ƒ™   p7ú
+   ğCÂ   PĞr	   @@ú
+   °ƒ™   °ƒ™   ¨.ú
+   pŠ	    DÂ   ğ·Å   °9ú
+   PDÂ   pŠ	   à?ú
+   €DÂ   È)ï
+   @@ú
+   È)ï
+   È)ï
+   ¨.ú
+   pŠ	   °DÂ   °¯   °9ú
+   àDÂ   pŠ	   à?ú
+   EÂ   4ï
+   @@ú
+   4ï
+   4ï
+   ¨.ú
+   pŠ	   @EÂ   pwb   °9ú
+   pEÂ   °ƒ™   p7ú
+    EÂ   ğj^   ¨.ú
+   °ƒ™   ĞEÂ   p¸Å   °9ú
+    FÂ   pŠ	   à?ú
+   0FÂ   È)ï
+   à?ú
+   à?ú
+   `FÂ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   7ú
+   H¥ú
+   FÂ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @@ú
+   È)ï
+   È)ï
+   ¨.ú
+   pŠ	   ÀFÂ   ğ¸Å   °9ú
+   ğFÂ   pŠ	   à?ú
+    GÂ   È)ï
+   @@ú
+   È)ï
+   È)ï
+   ¨.ú
+   pŠ	   °†×   pFÅ   °9ú
+   PGÂ   pŠ	   à?ú
+   €GÂ   È)ï
+   à?ú
+   à?ú
+   °GÂ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   7ú
+   H¥ú
+   àGÂ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @@ú
+   È)ï
+   È)ï
+   ¨.ú
+   pŠ	   ğ†×   °—   °9ú
+   HÂ   pŠ	   à?ú
+   @HÂ   à®ğ
+   @@ú
+   à®ğ
+   à®ğ
+   ¨.ú
+   pŠ	   pHÂ   ÀC   °9ú
+    HÂ   pŠ	   à?ú
+   ĞHÂ   à®ğ
+   @@ú
+   à®ğ
+   à®ğ
+   ¨.ú
+   pŠ	   0‡×   °tb   °9ú
+    IÂ   pŠ	   à?ú
+   0IÂ   Ø¶î
+   à?ú
+   `IÂ   àëú
+   à?ú
+   IÂ   ğù   @@ú
+   ğù   ğù   7ú
+   àëú
+   àëú
+   àëú
+   ÀIÂ   @@ú
+   @@ú
+   Ø¶î
+   Ø¶î
+   ¨.ú
+   pŠ	   ¨.ú
+   ğIÂ   ĞãÅ   `àÅ   P6ú
+    JÂ   pØ÷
+   °9ú
+   PJÂ   ğù   Fú
+   ğù   €JÂ   7ú
+   p‡×   °tb   °9ú
+   °JÂ   pŠ	   à?ú
+   àJÂ   Ø¶î
+   à?ú
+   KÂ   àëú
+   à?ú
+   @KÂ   ğù   @@ú
+   ğù   ğù   7ú
+   àëú
+   àëú
+   àëú
+   pKÂ   @@ú
+   @@ú
+   Ø¶î
+   Ø¶î
+   7ú
+   pŠ	   €6ú
+   pØ÷
+   °tb   pØ÷
+   °tb   pØ÷
+   °tb   pØ÷
+   °tb    KÂ   ĞKÂ   pŠ	   à?ú
+    LÂ   4ï
+   @@ú
+   4ï
+   4ï
+   °9ú
+   pŠ	   ¨.ú
+   ¨.ú
+   Á×   €Á×   ¨.ú
+   0LÂ   °‡×   °tb   `LÂ   °tb   °tb   LÂ   ¼ú
+   P6ú
+   ÀLÂ   pØ÷
+   7ú
+   pØ÷
+   pØ÷
+   pØ÷
+   ğ‡×   °tb   €6ú
+   °tb   °tb   °9ú
+   ¼ú
+   ¨.ú
+   ¨.ú
+   ğLÂ    MÂ   ¨.ú
+   ¨.ú
+   PMÂ   °tb   ğóü   @:ú
+   ğóü   ğóü   €MÂ   P1]	   p7ú
+   °MÂ   psg   P6ú
+   €6ú
+   ¨.ú
+   P1]	   P1]	   P1]	   psg   P1]	   àMÂ   NÂ   àEú
+   @NÂ   hšõ
+   P6ú
+   pNÂ   pØ÷
+   €6ú
+   pØ÷
+   pØ÷
+   pØ÷
+   @Fú
+   hšõ
+    NÂ   ĞNÂ   àEú
+    OÂ   ğóü   @Fú
+   ğóü   05ú
+   0OÂ   ¨.ú
+   ¨.ú
+   `OÂ   OÂ   0ˆ×   P6ú
+   ÀOÂ   °Èc   °9ú
+   pˆ×   p…×   7ú
+   p…×   ğOÂ    W   °9ú
+    PÂ   pŠ	   à?ú
+   PPÂ    j	   @@ú
+    j	    j	   @:ú
+   pŠ	    W   °Èc    W    W   °Èc    W    W    W   €PÂ   7ú
+   °PÂ   pØ÷
+   °9ú
+   àPÂ   pŠ	   à?ú
+   QÂ   ğù   @@ú
+   ğù   ğù   @:ú
+   pŠ	   @QÂ   7ú
+   €6ú
+   °Èc    W    W    W   pØ÷
+   °Èc    W    W    W   pØ÷
+   pQÂ    QÂ   °9ú
+   ¨.ú
+   ¨.ú
+   °ˆ×   ğˆ×   ¨.ú
+   ĞQÂ   °¬   @:ú
+   °¬   °¬    RÂ   °Èc   p7ú
+   0RÂ   È³ú
+   P6ú
+   `RÂ   RÂ   €6ú
+   ¨.ú
+   °Èc   °Èc   °Èc   È³ú
+   °Èc   ÀRÂ   ğRÂ   °¬    SÂ   °¬   °¬   PSÂ   °9ú
+   ¨.ú
+   ¨.ú
+   €SÂ   ¨.ú
+   ¨.ú
+   °SÂ   °¬   àSÂ   ¼ú
+   P6ú
+   ¼ú
+   TÂ    W   7ú
+    W    W    W   @TÂ   H¥ú
+   €6ú
+   H¥ú
+   H¥ú
+   °9ú
+   ¼ú
+   ¨.ú
+   ¨.ú
+   pTÂ   p#”   @:ú
+   p#”   p#”    TÂ    W   ¨.ú
+    W    W    W   ¨.ú
+   ĞTÂ   P6ú
+    UÂ    W   0UÂ    W    W   `UÂ   UÂ   ÀUÂ    VÂ   X\ï
+   P6ú
+   PVÂ    W   7ú
+    W    W    W   €VÂ   0‰×   €6ú
+   °VÂ   X\ï
+   àVÂ   ØÂó
+   P6ú
+   WÂ    W   p7ú
+    W   @WÂ   °†    €6ú
+    W    W   pWÂ   ØÂó
+    WÂ   ĞWÂ   ¼ú
+   P6ú
+    XÂ    W   7ú
+    W    W    W   0XÂ   àëú
+   €6ú
+   àëú
+   àëú
+   €6ú
+   ¼ú
+    W   °9ú
+    W    W   ¨.ú
+   ¨.ú
+   `XÂ   °9ú
+   ¨.ú
+   ¨.ú
+   XÂ   p#”   @:ú
+   p#”   p#”   ÀXÂ    W   p7ú
+   ğXÂ   °†    P6ú
+    YÂ   °)Â   @:ú
+   °)Â   °)Â   °)Â   °)Â   PYÂ   7ú
+   €YÂ   ˆÇú
+   @:ú
+   °YÂ   àYÂ   €6ú
+   °)Â   ˆÇú
+   ¨.ú
+    W    W    W   °†    °)Â    W   ¨.ú
+   ZÂ   @ZÂ   ûï
+   pZÂ   ûï
+   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+    ZÂ    C   p7ú
+    C   ĞZÂ    äø   P6ú
+    [Â    äÅ   päÅ   àEú
+   0[Â   àëú
+   P6ú
+   `[Â    W   €6ú
+    W    W    W   @Fú
+   àëú
+   [Â   p‰×   àEú
+   ÀAú
+   ğû
+   @Fú
+   ğû
+   05ú
+   ÀäÅ   °‰×   €6ú
+   ¨.ú
+    C    C    C    C    äø    C   À[Â   p#”   @:ú
+   p#”   p#”   àEú
+   ğ[Â    \Â   °9ú
+   P\Â    W   @Fú
+    W   ¨.ú
+   ¨.ú
+   ¨.ú
+   €\Â   °9ú
+   ¨.ú
+   ¨.ú
+   °\Â   p#”   @:ú
+   p#”   p#”   àEú
+   à\Â   ]Â   °9ú
+   @]Â    W   @Fú
+    W   ¨.ú
+   ¨.ú
+   p]Â   P6ú
+    ]Â   °J\	   Ğ]Â    ^Â   0¼Å   P6ú
+   0^Â   °¬   @:ú
+   °¬   °¬   °¬   °¬   `^Â   °¬   7ú
+   °¬   ^Â    W   @:ú
+   À^Â   p#”   €6ú
+   p#”   °¬    W   €6ú
+   0¼Å   °J\	   ğ^Â   °J\	   °J\	    _Â   P_Â   °9ú
+   ¨.ú
+   ¨.ú
+   €_Â   °¬   p7ú
+   °¬   °_Â   ğÆú
+   à?ú
+   ğ‰×   0Š×   @@ú
+   @:ú
+   °¬   à_Â   °J\	   ¨.ú
+   °J\	   °J\	   °J\	   ¨.ú
+   `Â   @`Â   pØ÷
+   °9ú
+   pØ÷
+   pØ÷
+   ¨.ú
+   ¨.ú
+   p`Â   °Š×   @:ú
+   °Š×   °Š×   åÅ   `àÅ   P6ú
+    `Â   pØ÷
+   7ú
+   pØ÷
+   pØ÷
+   pØ÷
+   Ğ`Â   °Èc   p7ú
+   °Èc    aÂ   È³ú
+   P6ú
+   ğŠ×   0‹×   €6ú
+   €6ú
+   °Èc   ¨.ú
+   `àÅ   `àÅ   `àÅ   pØ÷
+   `àÅ   ¨.ú
+   0aÂ   pØ÷
+   °9ú
+   ¨.ú
+   ¨.ú
+   `aÂ   °Š×   @:ú
+   °Š×   °Š×   aÂ   ¨.ú
+   ÀaÂ   P6ú
+   ğaÂ   0»Å    bÂ   PbÂ   °Èc   p7ú
+   €bÂ   È³ú
+   P6ú
+   °bÂ   p‹×   €6ú
+   €6ú
+   °Èc   0»Å   àbÂ   0»Å   0»Å   cÂ   ØÂó
+   P6ú
+   @cÂ   0»Å   €6ú
+   0»Å   0»Å   0»Å   °9ú
+   ØÂó
+   ¨.ú
+   ¨.ú
+   pcÂ   °9ú
+   ¨.ú
+   ¨.ú
+    cÂ   0»Å   P6ú
+   0»Å   ĞcÂ   °¬   €6ú
+   °¬   °¬   °¬   ¨.ú
+   0»Å   0»Å   0»Å   0»Å   °¬   0»Å   ¨.ú
+    dÂ   0dÂ   ğù   `dÂ   ğù   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+   dÂ   hîú
+   p7ú
+   hîú
+   ÀdÂ   Øğ
+   P6ú
+   ğdÂ   `åÅ   °åÅ   àEú
+   ÀAú
+   ğû
+   @Fú
+   ğû
+   05ú
+    æÅ   €6ú
+   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+   ¨.ú
+   ¨.ú
+    eÂ   °¬   p7ú
+   °¬   PeÂ   ¨©ú
+   P6ú
+   €eÂ    W   @:ú
+    W    W    W    W   °eÂ   p#”   7ú
+   p#”   àeÂ   pØ÷
+   @:ú
+   fÂ   °Š×   €6ú
+   °Š×    W   pØ÷
+   ¨.ú
+   °¬   °¬   °¬   °¬   ¨©ú
+    W   °¬   @fÂ   ÀC   @:ú
+   ÀC   ÀC   pfÂ   °Èc   p7ú
+    fÂ   È³ú
+   P6ú
+   ĞfÂ    gÂ   €6ú
+   ¨.ú
+   °Èc   °Èc   °Èc   È³ú
+   °Èc   0gÂ   `gÂ   ÀC   gÂ   ÀC   ÀC   ÀgÂ   ğgÂ    hÂ   P1]	   p7ú
+   °‹×   °k   P6ú
+   €6ú
+   PhÂ   P1]	   €hÂ   °9ú
+   ¨.ú
+   ¨.ú
+   °hÂ   °¬   p7ú
+   °¬   àhÂ   àÖr	   P6ú
+   €6ú
+   ¨.ú
+   °¬   °¬   °¬   °¬   àÖr	   °¬   ¨.ú
+   iÂ   ÀC   P6ú
+   @iÂ   ĞéY   piÂ    iÂ   °Èc   p7ú
+   ĞiÂ   È³ú
+   P6ú
+    jÂ   0jÂ   €6ú
+   €6ú
+   °Èc   ĞéY   `jÂ   ĞéY   ĞéY   jÂ   ØÂó
+   P6ú
+   ÀjÂ   ĞéY   €6ú
+   ĞéY   ĞéY   ĞéY   °9ú
+   ØÂó
+   ¨.ú
+   ¨.ú
+   ğjÂ   °9ú
+   ¨.ú
+   ¨.ú
+    kÂ   ĞéY   P6ú
+   ĞéY   PkÂ   °¬   €6ú
+   °¬   °¬   °¬   ¨.ú
+   ĞéY   ĞéY   ĞéY   ĞéY   °¬   ĞéY   ¨.ú
+   €kÂ   °kÂ   ğù   àkÂ   ğù   ÀAú
+   ğû
+   °9ú
+   ¨.ú
+   ¨.ú
+   lÂ   hîú
+   p7ú
+   hîú
+   @lÂ   Øğ
+   P6ú
+   plÂ   pŠ×   PæÅ   àEú
+   ÀAú
+   ğû
+   @Fú
+   ğû
+   05ú
+    æÅ   €6ú
+   ¨.ú
+   hîú
+   hîú
+   hîú
+   hîú
+   Øğ
+   hîú
+   ¨.ú
+   ¨.ú
+   ¨.ú
+    lÂ   ĞlÂ   ğ‹×   P6ú
+    mÂ   pDÅ   °9ú
+   0mÂ   H¥ú
+   7ú
+   H¥ú
+   `mÂ   ğ»Å   °9ú
+   mÂ   0ºÅ   €6ú
+   0ºÅ   ğ»Å   pDÅ   ğ»Å   ğ»Å   pDÅ   ğ»Å   ğ»Å   pDÅ   ğ»Å   ğ»Å   pDÅ   ğ»Å   ğ»Å   ÀmÂ   ğmÂ   H¥ú
+   °9ú
+   H¥ú
+   ¨.ú
+   ¨.ú
+    nÂ   0îÚ   @:ú
+   0îÚ   0îÚ   PnÂ   ğ»Å   p7ú
+   €nÂ   È³ú
+   P6ú
+   °nÂ   0Œ×   7ú
+   ànÂ   €6ú
+   ¨.ú
+   ğ»Å   ğ»Å   ğ»Å   È³ú
+   ğ»Å   oÂ   @oÂ   0îÚ   °9ú
+   0îÚ   0îÚ   ¨.ú
+   ¨.ú
+   poÂ   pŒ×   @:ú
+   pŒ×   pŒ×   àEú
+    oÂ   ĞoÂ   pDÅ   7ú
+   pDÅ    pÂ   0pÂ   0îÚ   @Fú
+   0îÚ   ¨.ú
+   ¨.ú
+   `pÂ   0îÚ   °9ú
+   ¨.ú
+   ¨.ú
+   pÂ   pŒ×   @:ú
+   pŒ×   pŒ×   ÀpÂ   pDÅ   ¨.ú
+   pDÅ   pDÅ   pDÅ   ¨.ú
+   ğpÂ    qÂ   pŒ×   ¨.ú
+   pŒ×   ¨.ú
+   PqÂ   €qÂ   °dË   P6ú
+   °qÂ   ğ»Å   °9ú
+   àqÂ   0ºÅ   7ú
+   0ºÅ   rÂ   Pıø   °9ú
+   @rÂ   pŠ	   à?ú
+   prÂ   H¥ú
+   @@ú
+   H¥ú
+   H¥ú
+   @:ú
+   pŠ	   Pıø   ğ»Å   Pıø   Pıø   ğ»Å   Pıø   Pıø   Pıø    rÂ   7ú
+   €6ú
+   ğ»Å   Pıø   Pıø   Pıø   ğ»Å   Pıø   Pıø   Pıø   ĞrÂ    sÂ   pŠ	   à?ú
+   0sÂ   p]š   p7ú
+   `sÂ   Ğ×K   @@ú
+   p]š   p]š   °9ú
+   pŠ	   ¨.ú
+   ¨.ú
+   sÂ   Òú
+   @:ú
+   Òú
+   Òú
+   ÀsÂ   ğ»Å   p7ú
+   ğsÂ   È³ú
+   P6ú
+    tÂ   PtÂ   €6ú
+   ¨.ú
+   ğ»Å   ğ»Å   ğ»Å   È³ú
+   ğ»Å   €tÂ   °tÂ   Òú
+   àtÂ   Òú
+   Òú
+   uÂ   @uÂ   

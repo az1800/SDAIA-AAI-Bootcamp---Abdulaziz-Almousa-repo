@@ -1,0 +1,50 @@
+[project]
+name = "mvc"
+version = "0.1.0"
+description = "Chatbot with RAG using LangChain, ChromaDB, and Groq"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # LLM / LangChain core
+    "langchain>=1.2.17",
+    "langchain-community>=0.4.1",
+    "langchain-groq>=0.1.0",
+    "langchain-text-splitters>=0.3.0",
+
+    # Vector store
+    "chromadb>=0.6.0",
+    "langchain-chroma>=0.2.0",
+
+    # Embeddings — fastembed uses onnxruntime only, no torch/transformers needed
+    "fastembed>=0.3.0",
+
+    # Document loaders (lightweight only)
+    "pypdf>=5.0.0",
+    "docx2txt>=0.8",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+
+    # Frontends
+    "chainlit>=2.11.1",
+    "python-telegram-bot>=22.7",
+    "textual>=8.2.5",
+
+    # Utilities
+    "asyncpg>=0.31.0",
+    "python-dotenv>=1.2.2",
+    "rich>=13.0.0",
+    "langsmith>=0.2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "mvc"
+module-root = "src"
+
+[tool.uv]
+constraint-dependencies = [
+    "onnxruntime<=1.20.1",
+]
